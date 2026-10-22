@@ -1,0 +1,67 @@
+import os
+import sys
+import tempfile
+from pathlib import Path
+
+import numpy as np
+import pytest
+
+ROOT = Path(__file__).resolve().parents[1]
+sys.path.insert(0, str(ROOT / "backend"))
+os.environ["JARVIS_DATA_DIR"] = tempfile.mkdtemp(prefix="jarvis-test-")
+os.environ["JARVIS_API_TOKEN"] = ""   # blank, not removed: .env must not fill the real token into tests
+os.environ["GROQ_API_KEY"] = ""   # tests never call the real cloud (and .env can't fill it back in)
+
+from jarvis.interfaces import LLMChunk, Transcript  # noqa: E402
+
+
+class FakeLLM:
+    """Streams scripted replies word by word."""
+
+    def __init__(self, replies=None):
+        self.replies = list(replies or [])
+        self.calls: list[list[dict]] = []
+
+    async def stream(self, messages, tools=None):
+        self.calls.append(messages)
+        text = self.replies.pop(0) if self.replies else "Sure. Happy to help with that."
+        for word in text.split(" "):
+            yield LLMChunk(text=word + " ")
+
+    async def complete(self, messages):
+        return "- Talked about testing."
+
+
+class FakeSTT:
+    def __init__(self, texts=None):
+        self.texts = list(texts or [])
+
+    def transcribe(self, pcm, hint=""):
+        return Transcript(self.texts.pop(0) if self.texts else "", 0.9, 0.01)
+
+
+class FakeTTS:
+    sample_rate = 16000
+
+    def synthesize(self, text):
+        return (np.sin(np.arange(1600) / 5) * 3000).astype(np.int16)  # 0.1 s tone
+
+
+class EnergyVAD:
+    frame_samples = 512
+
+    def prob(self, frame):
+        return 1.0 if np.abs(frame.astype(np.int32)).mean() > 500 else 0.0
+
+    def reset(self):
+        pass
+
+
+def tone(seconds: float, amp: int = 8000) -> np.ndarray:
+    return (np.sin(np.arange(int(16000 * seconds)) / 3) * amp).astype(np.int16)
+
+
+@pytest.fixture
+def settings(tmp_path):
+    from jarvis.config import Settings
+    return Settings(tmp_path / "settings.json")

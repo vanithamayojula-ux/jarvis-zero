@@ -1,0 +1,22 @@
+# Never tracked: secrets, your personal data, big models and machine-specific stuff.
+# (A pre-commit secret scan, scripts/git_secret_scan.py, double-checks every commit.)
+.env
+.env.*
+!.env.example
+data/
+models/
+.venv/
+frontend/node_modules/
+frontend/dist/
+__pycache__/
+*.pyc
+.pytest_cache/
+*.log
+*.pem
+*.key
+*.pfx
+*.sqlite
+*.db
+memory.json
+reminders*.json
+settings.json
