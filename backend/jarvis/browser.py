@@ -324,19 +324,33 @@ class BrowserError(RuntimeError):
 
 
 class EdgeController:
-    def __init__(self, profile_dir: Path, port: int = 9333, edge_path: str | None = None, guard=None):
+    def __init__(self, profile_dir: Path, port: int = 0, edge_path: str | None = None, guard=None):
         self.guard = guard                 # SiteGuard: bad sites are refused before they load (None = no checks)
         self.blocked: list[tuple[float, str, str]] = []   # (when, url, reason) of what the guard stopped
         self._watching = False
         self.profile_dir = Path(profile_dir)
-        self.port = port
+        # 0 = a new random port every time Edge starts (council decision, 22 Oct): no fixed, guessable control port.
+        # Edge writes the port it picked into <profile>/DevToolsActivePort; JARVIS reads it from there.
+        self.fixed_port = int(port or 0)
         self.edge_path = edge_path or next((p for p in EDGE_PATHS if os.path.exists(p)), None)
         self._ids = itertools.count(1)
         self._lock = threading.Lock()
         self.account_alert = ""            # set if Edge ever signed itself in (it was closed)
 
     # ---------- process & targets ----------
+    @property
+    def port(self) -> int:
+        if self.fixed_port:
+            return self.fixed_port
+        try:
+            first = (self.profile_dir / "DevToolsActivePort").read_text(encoding="utf-8").splitlines()[0].strip()
+            return int(first) if first.isdigit() else 0
+        except (OSError, IndexError, ValueError):
+            return 0
+
     def _http(self, path: str, method: str = "GET", timeout: float = 2.0):
+        if not self.port:
+            raise BrowserError("JARVIS's Edge isn't running.")
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method=method)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = r.read()
@@ -416,7 +430,12 @@ class EdgeController:
             raise BrowserError("Microsoft Edge isn't installed.")
         self.profile_dir.mkdir(parents=True, exist_ok=True)
         self._lock_out_accounts()
-        subprocess.Popen([self.edge_path, f"--remote-debugging-port={self.port}", "--remote-debugging-address=127.0.0.1",
+        try:
+            (self.profile_dir / "DevToolsActivePort").unlink()      # a stale port from a crashed Edge must not be used
+        except OSError:
+            pass
+        # Never --remote-allow-origins: without it Edge refuses control connections coming from web pages.
+        subprocess.Popen([self.edge_path, f"--remote-debugging-port={self.fixed_port}", "--remote-debugging-address=127.0.0.1",
                           f"--user-data-dir={self.profile_dir}", "--no-first-run", "--no-default-browser-check",
                           "--disable-sync",  # keep this profile separate: don't pull in your Microsoft account data
                           "--disable-features=msEdgeSidebarV2,msImplicitSignin", "--start-maximized",

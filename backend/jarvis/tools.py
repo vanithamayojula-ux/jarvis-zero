@@ -332,6 +332,9 @@ class ToolBox:
             # Browser errors are written to be spoken; anything else is a bug, and its text isn't for the user's ears.
             if isinstance(exc, BrowserError) and str(exc):
                 return ToolResult(str(exc))
+            # a bug: keep the details for fixing (tool name and the error only, never the arguments you gave)
+            import logging
+            logging.getLogger("jarvis.tools").exception("tool %s failed", name)
             return ToolResult("Sorry, that didn't work. Something went wrong on my side.")
 
     # -- tool definitions --

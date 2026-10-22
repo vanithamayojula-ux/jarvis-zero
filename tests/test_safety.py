@@ -90,3 +90,13 @@ def test_edge_profile_is_locked_down(tmp_path):
 def test_lists_parse_hosts_and_plain_formats():
     text = "0.0.0.0 a.example\n127.0.0.1 b.example # note\nc.example\n0.0.0.0 0.0.0.0\nlocalhost\n# comment"
     assert SiteGuard.parse(text) == {"a.example", "b.example", "c.example"}
+
+
+def test_token_never_reaches_the_logs():
+    import logging
+    from jarvis.__main__ import RedactSecrets
+    rec = logging.LogRecord("uvicorn.access", 20, "x", 1, '%s - "%s %s" %s',
+                            ("127.0.0.1:5", "WebSocket", "/ws?token=abc123SECRET&x=1", "[accepted]"), None)
+    RedactSecrets().filter(rec)
+    msg = rec.getMessage()
+    assert "abc123SECRET" not in msg and "token=***" in msg and "x=1" in msg

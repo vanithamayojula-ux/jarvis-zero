@@ -82,7 +82,7 @@ DEFAULTS: dict = {
     "approved_sites": ["google.com", "youtube.com", "github.com", "wikipedia.org", "gmail.com", "maps.google.com"],
     "browser": "edge",                   # "edge" = JARVIS's own controllable Edge window; or "chrome", "default"
     "browser_control": True,             # let JARVIS type, click and read pages in its own Edge window
-    "edge_debug_port": 9333,             # local-only DevTools port for that window
+    "edge_debug_port": 0,                # 0 = a new random local-only control port each time Edge starts
     "edge_profile": "edge-agent",        # data/<this>: JARVIS's own clean Edge profile (no accounts, sign-in blocked)
     "edge_open_any_site": True,          # in that clean Edge, open any website without asking first (blocklists apply)
     "site_allowlist": [],                # sites you've decided are safe even if a blocklist disagrees

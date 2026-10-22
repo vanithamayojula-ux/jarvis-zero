@@ -207,7 +207,7 @@ async def get_settings():
 _RANGES = {"smart_turn_max_ms": (500, 6000), "followup_s": (0, 600), "followup_min_confidence": (0, 1), "echo_coupling": (0, 5), "echo_margin": (1, 20),
            "noise_floor": (0, 0.5), "vad_threshold": (0.05, 0.99), "silence_ms": (150, 5000), "hold_ms": (0, 5000),
            "max_utterance_s": (2, 120), "history_turns": (1, 50), "speaking_rate": (0.5, 2.0),
-           "edge_debug_port": (1024, 65535)}
+           "edge_debug_port": (0, 65535)}
 _CHOICES = {"mode": {"push_to_talk", "hands_free"}, "activation": {"wake_word", "voice"},
             "cloud_tts_voice": {"troy", "austin", "daniel", "autumn", "diana", "hannah"},
             "browser": {"edge", "chrome", "default"}}
