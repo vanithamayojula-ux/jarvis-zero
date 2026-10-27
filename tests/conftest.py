@@ -79,3 +79,24 @@ def _clear_abort():
 def settings(tmp_path):
     from jarvis.config import Settings
     return Settings(tmp_path / "settings.json")
+
+
+# CI: the downloaded voice/speech models (models/, whisper cache) are not in git, so on a fresh
+# checkout (GitHub Actions) the tests that need the real files are skipped instead of failing.
+_NEEDS_MODELS = {
+    "test_local_models.py::test_whisper_offline",
+    "test_local_models.py::test_piper_offline",
+    "test_local_models.py::test_default_voice_offline",
+    "test_local_models.py::test_make_tts_falls_back_to_piper",
+    "test_low_memory.py::test_piper_gives_scratch_memory_back_after_each_sentence",
+    "test_tts_text.py::test_available_voices_lists_both_engines",
+}
+
+
+def pytest_collection_modifyitems(items):
+    if (ROOT / "models" / "piper" / "en_GB-alan-medium.onnx").exists():
+        return
+    skip = pytest.mark.skip(reason="local voice models not installed (run install.ps1)")
+    for item in items:
+        if item.nodeid.replace("tests/", "", 1) in _NEEDS_MODELS:
+            item.add_marker(skip)
