@@ -1,0 +1,32 @@
+name: tests
+
+# Runs the whole pytest suite on every push / PR to master.
+on:
+  push:
+    branches: [master]
+  pull_request:
+    branches: [master]
+
+# A newer push cancels the older run of the same branch.
+concurrency:
+  group: tests-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+jobs:
+  pytest:
+    # Windows: the code and tests use ctypes.windll / Windows APIs.
+    runs-on: windows-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          cache: pip
+      - name: Install dependencies
+        run: python -m pip install -r requirements.txt
+      - name: Run tests
+        run: python -m pytest -q -p no:cacheprovider
