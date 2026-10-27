@@ -84,27 +84,72 @@ PICK_PROMPT = (
     "point of view (me, my brain, my code), with a funny twist. For two-row and multi-row templates the captions are just "
     "the things themselves: never write words like 'rejecting', 'loving', 'plain', 'fancy' or 'panik'. Never just repeat "
     "the conversation back. Be kind: never mock the person, no slurs, nothing adult, no emojis, hashtags or links.\n"
-    "Examples:\n"
-    'exam tomorrow, not started -> {{"t":"panik_kalm","mood":"scared","c":["Exam tomorrow","Only three topics matter",'
-    '"I haven\'t opened the book"]}}\n'
-    'fixed a bug after 6 hours -> {{"t":"hide_the_pain","mood":"tired","c":["Fixed it after 6 hours","It was one typo"]}}\n'
-    'open youtube -> {{"t":"roll_safe","mood":"smug","c":["Can\'t be bored","If YouTube is always one word away"]}}\n'
-    'set a timer for 10 minutes -> {{"t":"waiting_skeleton","mood":"waiting","c":["Me after setting a 10 minute timer",'
-    '"Still waiting"]}}\n'
+    "Examples of the style (never copy their captions):\n{examples}\n"
     "For a plain command, joke about the situation behind it (waiting, procrastinating, being lazy, needing a break), "
     "never Spidey's own reply words.\n"
-    'tea or coffee -> {{"t":"drake","mood":"smug","c":["Coffee jitters at 2am","Tea and inner peace"]}}\n'
     "Templates (key: when it fits [how many captions]):\n{templates}\n"
     "Moods: " + ", ".join(MOODS) + "\n"
     'Reply with ONLY JSON: {{"t": "<template key>", "mood": "<mood>", "c": ["caption", ...]}}')
 
+# Two of these go into each request, picked at random: with a fixed set the model sent the "open youtube" example back
+# word for word whenever someone said "open youtube" (seen live 27 Oct). Copies of any of them are thrown away.
+EXAMPLES = [
+    ("exam tomorrow, not started", {"t": "panik_kalm", "mood": "scared",
+                                    "c": ["Exam tomorrow", "Only three topics matter", "I haven't opened the book"]}),
+    ("fixed a bug after 6 hours", {"t": "hide_the_pain", "mood": "tired", "c": ["Fixed it after 6 hours", "It was one typo"]}),
+    ("open spotify", {"t": "roll_safe", "mood": "smug", "c": ["Can't hear my problems", "If the music is louder"]}),
+    ("set a timer for 10 minutes", {"t": "waiting_skeleton", "mood": "waiting",
+                                    "c": ["Me after setting a 10 minute timer", "Still waiting"]}),
+    ("which is better, tea or coffee", {"t": "drake", "mood": "smug", "c": ["Coffee jitters at 2am", "Tea and inner peace"]}),
+    ("my phone fell in water", {"t": "this_is_fine", "mood": "chaos", "c": ["Phone's in rice", "Everything is fine"]}),
+    ("finally got the job", {"t": "leo_cheers", "mood": "proud", "c": ["Months of applying", "Worth every rejection"]}),
+]
 
-def prompt(avoid: list[str] | tuple = ()) -> str:
+
+def _norm(c: str) -> str:
+    return re.sub(r"[^a-z0-9]+", " ", c.lower()).strip()
+
+
+_EXAMPLE_CAPTIONS = {_norm(c) for _, ex in EXAMPLES for c in ex["c"]} | {
+    _norm("Can't be bored"), _norm("If YouTube is always one word away")}      # an older example, seen copied live
+
+
+def is_copy(pick: dict) -> bool:
+    """The model sent one of the style examples back instead of writing its own."""
+    return any(_norm(c) in _EXAMPLE_CAPTIONS for c in pick.get("c") or [] if c)
+
+
+def prompt(avoid: list[str] | tuple = (), rng: random.Random | None = None) -> str:
     """avoid = templates shown lately (so it doesn't send the same meme every time)."""
     lines = [f"{k}: {use} [{SLOTS[layout]}]" for k, (_, layout, _, use) in TEMPLATES.items()]
-    text = PICK_PROMPT.format(templates="\n".join(lines))
+    examples = "\n".join(f"{moment} -> {json.dumps(ex)}" for moment, ex in (rng or random).sample(EXAMPLES, 2))
+    text = PICK_PROMPT.format(templates="\n".join(lines), examples=examples)
     keys = [k for k in avoid if k in TEMPLATES]
     return text + (f"\nDon't use these, they were just shown: {', '.join(keys)}." if keys else "")
+
+
+# How often a meme pops up (setting meme_rate). Spidey still acts out every mood; this is only the meme panel.
+STRONG = {"laughing", "excited", "proud", "love", "sad", "annoyed", "scared", "surprised", "tired", "chaos"}
+
+
+def should_show(rate: str, mood: str, turn: int) -> bool:
+    """always: every reply. strong: only real feelings. sometimes: real feelings, plus about every third reply."""
+    if rate == "always":
+        return True
+    if mood in STRONG:
+        return True
+    return rate != "strong" and turn % 3 == 0
+
+
+# Moments spidey reacts to by itself (POST /api/react): a fixed set, so nothing outside can put words in.
+MOMENTS = {
+    "break": ("I've been at the laptop for two hours straight without a break", "Stretch break? Your back will thank you.",
+              "tired"),
+    "night": ("It's way past midnight and I'm still on the laptop", "Go to sleep! Tomorrow-you is begging.", "tired"),
+    "morning": ("Good morning, first time on the laptop today", "Morning! New day, let's go.", "happy"),
+    "focus_done": ("I just finished a focus session", "Nice, round done! Take five.", "proud"),
+    "break_done": ("My study break is over, back to work", "Break's over, back at it. You've got this.", "thinking"),
+}
 
 
 def parse_pick(text: str) -> dict | None:

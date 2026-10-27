@@ -426,6 +426,8 @@ class Link(threading.Thread):
         self.typing_where = ""                        # typing mode is on, typing into this app ("" = off)
         self.tv_on = False                            # the mini TV window is showing (the right-click toggle)
         self.memes_on = True                          # a meme pops up beside spidey after each reply
+        self.companion = True                         # break nudges, "go to sleep", the morning hello
+        self.pomodoro: dict = {}                      # study mode: {"phase", "round", "ends_at", …} ({} = off)
 
     def note_looking(self, app: str, seconds: float = 3.0) -> None:
         self.looking_app, self.looking_until = str(app or "a window")[:30], time.monotonic() + max(0.0, min(seconds, 3.0))
@@ -473,6 +475,9 @@ class Link(threading.Thread):
                             self.events.put(ev)
                         elif kind == "memes":
                             self.memes_on = bool(ev.get("on"))
+                        elif kind == "pomodoro":
+                            self.pomodoro = ev
+                            self.events.put(ev)
                         elif kind in ("mood", "meme"):
                             self.events.put(ev)
             except Exception:
@@ -511,6 +516,9 @@ class Link(threading.Thread):
                     tv = info.get("tv")
                     self.tv_on = bool(tv.get("on")) if isinstance(tv, dict) else False
                     self.memes_on = bool(info.get("memes", self.memes_on))
+                    self.companion = bool(info.get("companion", self.companion))
+                    pomo = info.get("pomodoro")
+                    self.pomodoro = pomo if isinstance(pomo, dict) else {}
                     look = info.get("looking")
                     if isinstance(look, dict) and look.get("app"):
                         self.note_looking(look["app"], float(look.get("expires_in") or 0.0))
@@ -662,6 +670,9 @@ class Bot:
         self.ptr, self.ptr_moved_at, self.ptr_t = (0, 0), -99.0, 0.0
         self.ptr_dist, self.flinch_cool = 1e9, 0.0
         self.away_for, self.present_at, self.last_yawn = 0.0, 0.0, -99.0
+        self.active_since = None                                # companion: when this stretch at the keyboard began
+        self.break_nudged_at = -1e9                             # …the last "stretch break?"
+        self.night_nudged = self.morning_said = None            # dates of tonight's "go to sleep" / today's hello
         self.seen: set[str] = {r["id"] for r in self._read_reminders() if self._due(r) <= datetime.now()}
         self.next_rem_check = 0.0
         if test_seconds:
@@ -1101,6 +1112,10 @@ class Bot:
                 if ev.get("on"):
                     self.poke()
                     self.react("nod")
+                continue
+            if ev.get("type") == "pomodoro":                    # study mode moved on (the pill shows the time)
+                self.poke()
+                self.react({"break": "celebrate", "focus": "hop"}.get(ev.get("phase"), "nod"), awake=True)
                 continue
             if ev.get("type") == "mood":                        # Spidey's feeling about this moment: act it out
                 self.quick_mood = str(ev.get("mood") or "")
@@ -1799,6 +1814,12 @@ class Bot:
         if self.status.typing_where:                         # typing mode: everything said or typed goes into that app
             items.append(("typing", GLYPH["type"], f"typing into {self.status.typing_where} · end", ACCENT,
                           lambda: self.status.send("end")))      # a click on the pill ends typing mode
+        pomo = self.status.pomodoro
+        if pomo.get("phase") in ("focus", "break") and pomo.get("ends_at"):   # study mode: the round's time left
+            m, sec = divmod(max(0, int(float(pomo["ends_at"]) - time.time())), 60)
+            label = f"focus {pomo.get('round', 1)} · {m}:{sec:02d}" if pomo["phase"] == "focus" else f"break · {m}:{sec:02d}"
+            items.append(("pomo", GLYPH["timer"], label, ACCENT if pomo["phase"] == "focus" else BUBBLE_INK,
+                          lambda: self.status.send("how long is left on the pomodoro")))
         busy = {"listening": ("mic", "Listening"), "thinking": ("think", "Thinking"),
                 "speaking": ("speak", "Speaking")}.get(state)
         if busy:
@@ -2536,6 +2557,7 @@ class Bot:
         elif self.away_for and away < 1.5:
             self._welcome(self.away_for)
             self.away_for = 0.0
+        self._companion(t, away)
         doze = 60 if self.mood == "night" else 120               # nods off sooner late at night
         if state == "idle" and away >= doze and t - self.last_yawn > 10 \
                 and not (self.sleepy or self.action or self.alert_text or self.showcase):
@@ -2611,11 +2633,50 @@ class Bot:
         self.perch = None
         self.travel(*self.home, style="leap")
 
+    BREAK_AFTER = 2 * 3600          # at the keyboard this long without a 5-minute break: "stretch break?"
+    NUDGE_AGAIN = 3600              # …and again an hour later if you carry on
+
+    def _companion(self, t: float, away: float):
+        """A study buddy, not a nag: a break nudge after two hours at it, "go to sleep" once a night after 12:30,
+        and the morning hello (in _welcome). Each asks Spidey for a matching meme. Off with "stop the nudges"."""
+        if away >= 300:
+            self.active_since = None                             # a real break resets the clock
+        elif self.active_since is None:
+            self.active_since = t
+        if not (self.status.online and self.status.companion) or away >= 60 or self.alert_text or self.showcase:
+            return
+        if self.status.pomodoro.get("phase") in ("focus", "break"):
+            return                                               # study mode keeps its own breaks
+        now = datetime.now()
+        if t - self.active_since >= self.BREAK_AFTER and t - self.break_nudged_at >= self.NUDGE_AGAIN:
+            self.break_nudged_at = t
+            hours = int((t - self.active_since) // 3600)
+            self._nudge(f"You've been at it for {hours} hours straight. Stretch break? Even five minutes helps.",
+                        "yawn", "break")
+        elif (now.hour, now.minute) >= (0, 30) and now.hour < 5 and self.night_nudged != now.date():
+            self.night_nudged = now.date()
+            self._nudge(f"It's {now.strftime('%I:%M').lstrip('0')} AM… go to sleep? Tomorrow-you is begging.",
+                        "yawn", "night")
+
+    def _nudge(self, text: str, anim: str, moment: str):
+        self.poke()
+        self.react(anim, awake=True)
+        if self.bubble is None and self.bar is None:
+            self.show_bubble(text, hide_after=8)
+        self.status.post("/api/react", {"moment": moment})       # Spidey's meme for it (a fixed moment, no words)
+
     def _welcome(self, away: float):
         """You're back after a while: wakes up if dozing, a happy bounce, and a hello after a long break."""
         asleep = self.sleepy
         self.poke()
         if self.alert_text:
+            return
+        now = datetime.now()
+        if away >= 3 * 3600 and 5 <= now.hour < 12 and self.morning_said != now.date() and self.status.companion \
+                and self.status.online:
+            self.morning_said = now.date()                       # first time at the laptop this morning
+            self.root.after(950 if asleep else 0, lambda: self._nudge(
+                "Good morning! Say “brief me” for your day.", "happy", "morning"))
             return
         self.root.after(950 if asleep else 0, lambda: self.react("happy"))
         if away >= 300 and self.bubble is None and self.bar is None:

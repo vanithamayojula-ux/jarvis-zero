@@ -38,10 +38,27 @@ def test_parse_pick_cleans_and_fits_the_template():
 
 
 def test_prompt_lists_every_template_and_avoids_recent_ones():
-    text = memes.prompt(["drake", "not_a_template"])
+    import random
+    text = memes.prompt(["drake", "not_a_template"], random.Random(3))
     assert all(k in text for k in memes.TEMPLATES)
     assert text.endswith("Don't use these, they were just shown: drake.")
     assert "Don't use" not in memes.prompt()
+    assert sum(moment in text for moment, _ in memes.EXAMPLES) == 2         # two random style examples, not all
+
+
+def test_copied_examples_are_caught():
+    assert memes.is_copy({"t": "roll_safe", "c": ["Can't be bored!", "If YouTube is always one word away"]})   # seen live
+    assert memes.is_copy({"t": "drake", "c": ["coffee jitters at 2AM", "something new"]})
+    assert not memes.is_copy({"t": "drake", "c": ["Cold brew", "Chai at the tapri"]})
+
+
+@pytest.mark.parametrize("rate, mood, turn, shown", [
+    ("always", "happy", 1, True), ("strong", "happy", 3, False), ("strong", "laughing", 1, True),
+    ("sometimes", "happy", 1, False), ("sometimes", "happy", 2, False), ("sometimes", "happy", 3, True),
+    ("sometimes", "sad", 1, True),
+])
+def test_how_often(rate, mood, turn, shown):
+    assert memes.should_show(rate, mood, turn) is shown
 
 
 @pytest.mark.parametrize("said, mood", [
@@ -161,7 +178,8 @@ class MemeLLM(FakeLLM):
         return self.answer
 
 
-def _conv(settings, llm, channel="local"):
+def _conv(settings, llm, channel="local", rate="always"):
+    settings.update({"meme_rate": rate})
     tools = ToolBox(settings, Reminders(settings.path.parent / "r.json"))
     tools.memes = FakeMaker()
     conv = Conversation(settings, llm, tools, channel)
@@ -179,7 +197,7 @@ def _turn(conv, text):
 
 
 def test_a_command_gets_a_mood_then_a_meme(settings):
-    llm = MemeLLM('{"t": "roll_safe", "mood": "smug", "c": ["Can\'t be bored", "If reminders do the remembering"]}')
+    llm = MemeLLM('{"t": "roll_safe", "mood": "smug", "c": ["Can\'t forget water", "If reminders do the remembering"]}')
     conv, events = _conv(settings, llm)
     _turn(conv, "remind me in 10 minutes to drink water")
     kinds = [e["type"] for e in events]
@@ -202,7 +220,7 @@ def test_no_memes_when_off_on_calls_or_typing(settings):
     settings.update({"memes": False})
     conv, events = _conv(settings, MemeLLM("{}"))
     _turn(conv, "remind me in 10 minutes to drink water")
-    assert events == []
+    assert [e["type"] for e in events] == ["mood"] and not conv.llm.asked     # spidey still acts it out; no meme
     assert "no more memes" in " ".join(_turn(conv, "stop the memes")).lower() or settings.get("memes") is False
     settings.update({"memes": True})
     conv, events = _conv(settings, MemeLLM("{}"), channel="phone")

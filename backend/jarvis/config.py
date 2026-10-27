@@ -83,7 +83,7 @@ DEFAULTS: dict = {
     },
     # Shortcuts on these desktops count as approved apps ("open valorant"), except the blocked ones.
     "shortcut_dirs": [_known_folder(0x10, "Desktop"), _known_folder(0x19, "Desktop")],
-    "blocked_shortcuts": ["ShutDown", "MinGW Installer", "JARVIS", "JARVIS Zero"],
+    "blocked_shortcuts": ["ShutDown", "MinGW Installer", "JARVIS", "JARVIS Zero", "Spidey"],
     "approved_sites": ["google.com", "youtube.com", "github.com", "wikipedia.org", "gmail.com", "maps.google.com"],
     "browser": "edge",                   # "edge" = JARVIS's own controllable Edge window; or "chrome", "default"
     "browser_control": True,             # let JARVIS type, click and read pages in its own Edge window
@@ -99,7 +99,10 @@ DEFAULTS: dict = {
     "picture_board": True,               # "show me a picture of …" (Wikipedia) and "draw …" on spidey's picture board
     "mini_tv": True,                     # "play lofi on the TV": a small always-on-top window beside spidey (data/edge-tv)
     "tv_size": "medium",                 # small | medium | large ("make the TV bigger")
-    "memes": True,                       # a reaction meme beside spidey after every reply ("stop the memes" turns it off)
+    "voice_cues": True,                  # the cloud voice laughs / chuckles / sighs where the reply says "haha", "ugh"…
+    "memes": True,                       # reaction memes beside spidey ("stop the memes" turns them off)
+    "meme_rate": "sometimes",            # always | sometimes (strong moods, plus about every third reply) | strong
+    "companion": True,                   # break nudges, "go to sleep" late at night, a morning hello (spidey)
     "meme_model": "openai/gpt-oss-20b",  # the Groq model that picks memes (its own free limits, apart from chat)
     "screen_reading": True,            # read the current window when asked (UI Automation, then offline OCR); never leaves the laptop
     "screen_to_cloud": False,          # sending screen contents to a cloud model: off, and only ever by your say-so

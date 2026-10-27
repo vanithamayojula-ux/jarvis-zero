@@ -785,11 +785,46 @@ _MEMES_ON = re.compile(rf"^(?:(?:turn|switch)\s+on\s+{_MEMES}|(?:turn|switch)\s+
                        rf"bring back)\s+{_MEMES}|show\s+(?:me\s+)?memes(?:\s+again)?|{_MEMES}\s+on|memes\s+again)$")
 
 
+# Study mode: "start a pomodoro", "study mode for 50 minutes", "start a 45 minute focus session", "how long left on the
+# pomodoro", "stop the pomodoro"
+_POMO = r"(?:pomodoro|pomodoros|study mode|focus mode|study session|focus session|study timer|focus timer)"
+_POMO_START = re.compile(rf"^(?:(?:start|begin|turn on|switch on|do|let'?s do|let'?s start)\s+)?(?:a\s+|the\s+|my\s+)?"
+                         rf"(?:(?P<a>\d{{1,3}})\s*(?:-\s*)?min(?:ute)?s?\s+)?{_POMO}(?:\s+on)?"
+                         rf"(?:\s+(?:for\s+)?(?P<b>\d{{1,3}})\s*min(?:ute)?s?)?$|"
+                         rf"^(?:let'?s|time to|help me)\s+(?:study|focus)(?:\s+for\s+(?P<c>\d{{1,3}})\s*min(?:ute)?s?)?$")
+_POMO_STOP = re.compile(rf"^(?:(?:stop|end|cancel|quit|finish|turn off|switch off)\s+(?:the\s+|my\s+)?{_POMO}|"
+                        rf"(?:the\s+)?{_POMO}\s+off|i'?m done studying)$")
+_POMO_LEFT = re.compile(rf"^(?:how (?:much time|long|many minutes)(?: is| are)? left(?: (?:on|in) (?:the |this |my )?"
+                        rf"(?:{_POMO}|round|break|focus))?|{_POMO} status|how'?s (?:the|my) {_POMO} going)$")
+
+
+def route_pomodoro(t: str) -> list[tuple[str, dict]] | None:
+    if _POMO_STOP.match(t):
+        return [("pomodoro", {"action": "stop"})]
+    if _POMO_LEFT.match(t):
+        return [("pomodoro", {"action": "status"})]
+    m = _POMO_START.match(t)
+    if m:
+        minutes = m.group("a") or m.group("b") or m.group("c")
+        return [("pomodoro", {"action": "start", **({"minutes": int(minutes)} if minutes else {})})]
+    return None
+
+
+_NUDGES = r"(?:the\s+|your\s+)?(?:nudges?|break reminders?|sleep reminders?|companion mode|study buddy)"
+_NUDGES_OFF = re.compile(rf"^(?:(?:stop|disable|turn off|switch off|pause)\s+{_NUDGES}|stop nudging me|{_NUDGES}\s+off|"
+                         rf"no more {_NUDGES})$")
+_NUDGES_ON = re.compile(rf"^(?:(?:start|enable|turn on|switch on|bring back)\s+{_NUDGES}|{_NUDGES}\s+on)$")
+
+
 def route_memes(t: str) -> list[tuple[str, dict]] | None:
     if _MEMES_OFF.match(t):
         return [("set_memes", {"on": False})]
     if _MEMES_ON.match(t):
         return [("set_memes", {"on": True})]
+    if _NUDGES_OFF.match(t):
+        return [("set_companion", {"on": False})]
+    if _NUDGES_ON.match(t):
+        return [("set_companion", {"on": True})]
     return None
 
 
@@ -907,8 +942,9 @@ def route_all(text: str, settings: Settings, find_app=None, spoken: bool = False
         return [("show_actions", {})]            # straight from the action log, no model involved
     if _RESUME_Q.match(text.strip()):
         return [("resume_actions", {})]          # only ever from what the person said (the interpreter can't use it)
-    io = route_io_mode(clean_command(text)) or route_memes(clean_command(text)) or \
-        route_memes(re.sub(r"[.!?]+$", "", text.strip().lower()))      # (clean_command eats a final "on")
+    raw = re.sub(r"[.!?]+$", "", text.strip().lower())               # (clean_command eats a final "on")
+    io = route_io_mode(clean_command(text)) or route_memes(clean_command(text)) or route_memes(raw) or \
+        route_pomodoro(clean_command(text)) or route_pomodoro(raw)
     if io:
         return io
     if HEAR_ME.match(text.strip()):
@@ -1704,6 +1740,7 @@ class Conversation:
         self._pictures = None         # board.Pictures (Wikipedia), made on the first "show me a picture of …"
         self.last_drawing = ""        # what was drawn last, for "draw it again"
         self._recent_memes: list[str] = []   # the last few meme templates shown (so the next one is different)
+        self._meme_turn = 0                  # replies so far (meme_rate "sometimes": about every third one)
 
     @property
     def pending(self) -> ToolResult | None:
@@ -1739,19 +1776,49 @@ class Conversation:
             self._meme_later(user_text)
 
     def _meme_later(self, user_text: str) -> None:
-        """Spidey reacts to every turn: a mood at once (from the words, nothing sent anywhere), then a meme for the
-        moment in its meme panel about a second later. The meme model gets only the two lines, redacted (no keys,
-        numbers or addresses), and nothing read from a page or window."""
+        """Spidey reacts to every turn: a mood at once (from the words, nothing sent anywhere), then now and then a
+        meme for the moment in its meme panel (setting meme_rate). The meme model gets only the two lines, redacted
+        (no keys, numbers or addresses), and nothing read from a page or window."""
         from . import memes
-        from .board import STORE
         from .untrusted import redact
         maker = getattr(self.tools, "memes", None) if self.tools else None
-        if maker is None or self.notify is None or self.channel != "local" or self.settings.get("memes") is False:
+        if maker is None or self.notify is None or self.channel != "local":
             return
         last = next((m for m in reversed(self.history) if m["role"] == "assistant"), {})
         answer = "" if last.get("tainted") or last.get("screen") else str(last.get("content") or "")
         mood = memes.guess_mood(user_text, answer)
+        self._show({"type": "mood", "mood": mood})             # spidey acts out every mood, memes or not…
+        if self.settings.get("memes") is False:
+            return
+        self._meme_turn += 1
+        if memes.should_show(self.settings.get("meme_rate") or "sometimes", mood, self._meme_turn):
+            self._meme_soon(redact(user_text)[:300], redact(answer)[:300] if answer else "", mood)   # …a meme now and then
+
+    def react_moment(self, key: str, detail: str = "") -> bool:
+        """A meme for something that happened rather than something said: a break nudge, late at night, a finished
+        focus round, a video on the mini TV. key is from a fixed list (memes.MOMENTS, or "tv"); detail is only ever a
+        video title, cleaned. False when memes are off or there's nowhere to show it."""
+        from . import memes
+        if getattr(self.tools, "memes", None) is None or self.notify is None or self.channel != "local" or \
+                self.settings.get("memes") is False:
+            return False
+        if key == "tv":
+            title = strip_urls(clean_label(detail, 90))
+            said, answer, mood = f"We're watching this on the mini TV: {title}", f"Ooh, {title}. Good pick.", "excited"
+        elif key in memes.MOMENTS:
+            said, answer, mood = memes.MOMENTS[key]
+        else:
+            return False
         self._show({"type": "mood", "mood": mood})
+        self._meme_soon(said, answer, mood)
+        return True
+
+    def _meme_soon(self, said: str, answer: str, mood: str) -> None:
+        """In the background: the meme model picks a template and writes captions (said and answer are already
+        cleaned); a copied style example or no cloud means a plain reaction picture for the mood instead."""
+        from . import memes
+        from .board import STORE
+        maker = self.tools.memes
         cloud_only = getattr(self.llm, "cloud_only", None) if getattr(self.llm, "key", None) else None
         recent = list(self._recent_memes)
 
@@ -1760,13 +1827,15 @@ class Conversation:
             if cloud_only and answer:
                 try:
                     out = await cloud_only([{"role": "system", "content": memes.prompt(recent)},
-                                            {"role": "user", "content": f"THEY SAID: {redact(user_text)[:300]}\n"
-                                                                        f"SPIDEY ANSWERED: {redact(answer)[:300]}"}],
+                                            {"role": "user", "content": f"THEY SAID: {said}\nSPIDEY ANSWERED: {answer}"}],
                                            max_tokens=300, temperature=0.9, timeout=8.0,
                                            model=self.settings.get("meme_model") or None)
                 except Exception:
                     out = None
                 pick = memes.parse_pick(out or "")
+                if pick and memes.is_copy(pick):
+                    self._log("tool", f"meme copied an example ({pick['t']}): plain picture instead")
+                    pick = None
             pick = pick or memes.fallback_pick(mood)
             try:
                 png = await asyncio.to_thread(maker.make, pick)
@@ -2177,6 +2246,13 @@ class Conversation:
             result = await self._board(name, args)
         elif name in ("tv_show", "tv_on", "tv_off", "tv_control", "tv_size", "tv_what"):
             result = await self._tv(name, args)
+        elif name == "pomodoro":
+            result = self._pomodoro(args)
+        elif name == "set_companion":
+            on = bool(args.get("on"))
+            self.settings.update({"companion": on})
+            result = ToolResult("Okay, I'll nudge you about breaks and sleep again." if on else
+                                "Okay, no more break or sleep nudges. Say “nudges on” to bring them back.")
         elif name == "set_memes":
             on = bool(args.get("on"))
             self.settings.update({"memes": on})
@@ -2605,6 +2681,8 @@ class Conversation:
                 title = strip_urls(await asyncio.to_thread(tv.show, hit["url"], True, hit["title"])) or p["label"]
                 self.tools.media_opened_at = time.time()    # it's playing sound: hands-free gets stricter, as with Edge
                 self._show({"type": "tv", "on": True, "title": title})
+                if random.random() < 0.6:
+                    self._watch_along(tv, (getattr(tv, "showing", None) or {}).get("title") or title)
                 return ToolResult(f"On the TV: {title}.", data=True)
             await asyncio.to_thread(tv.show, p["url"], False, p["label"])
             self._show({"type": "tv", "on": True, "title": p["label"]})
@@ -2614,6 +2692,45 @@ class Conversation:
         except Exception as exc:
             self._log("tool", f"tv {name} failed: {type(exc).__name__}: {exc}")
             return ToolResult("The TV didn't work just then. Try again?")
+
+    def _pomodoro(self, args: dict) -> ToolResult:
+        """Study mode: focus rounds and breaks, the time on spidey's pill, a nudge and a meme at each change."""
+        from .companion import spoken_left
+        pomo = getattr(self.tools, "pomodoro", None)
+        if pomo is None:
+            return ToolResult("Study mode isn't available here.")
+        action = args.get("action")
+        if action == "stop":
+            if pomo.phase == "off":
+                return ToolResult("Study mode isn't on. Say “start a pomodoro” when you want one.")
+            done = pomo.stop()
+            self._show(pomo.status())
+            return ToolResult(f"Study mode off. You finished {done} round{'s' if done != 1 else ''}. Nice work."
+                              if done else "Study mode off. Even starting counts.")
+        if action == "status":
+            st = pomo.status()
+            if st["phase"] == "off":
+                return ToolResult("Study mode isn't on. Say “start a pomodoro” to begin.")
+            what = f"focus round {st['round']}" if st["phase"] == "focus" else "your break"
+            return ToolResult(f"{spoken_left(st['left_s'])} left in {what}.")
+        st = pomo.start(args.get("minutes") or 25)
+        self._show(st)
+        return ToolResult(f"Study mode on: {pomo.focus_min} minutes of focus, then a {pomo.break_min} minute break. "
+                          f"The time's on my little pill. Say “stop the pomodoro” to end it.")
+
+    def _watch_along(self, tv, title: str) -> None:
+        """Spidey reacts to what's on the mini TV (only its title goes to the meme model), once it's been on a bit,
+        and only if the same thing is still showing."""
+        async def later():
+            await asyncio.sleep(random.uniform(20, 35))
+            if await asyncio.to_thread(tv.on) and (getattr(tv, "showing", None) or {}).get("title") == title:
+                self.react_moment("tv", title)
+        try:
+            task = asyncio.get_running_loop().create_task(later())
+        except RuntimeError:
+            return
+        self._learning.add(task)
+        task.add_done_callback(self._learning.discard)
 
     async def _draw(self, what: str, fresh: bool = False) -> dict | None | bool:
         """The model draws it as SVG; only the shapes that pass board.validate_drawing reach spidey. None = the cloud

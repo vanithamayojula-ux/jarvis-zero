@@ -388,6 +388,8 @@ class ToolBox:
         self.edge = edge                     # EdgeController for JARVIS's own Edge window (None = no browser control)
         self.tv = None                       # tv.MiniTV: spidey's mini TV (the server sets it; None = not available)
         self.memes = None                    # memes.MemeMaker: spidey's meme reactions (the server sets it)
+        from .companion import Pomodoro
+        self.pomodoro = Pomodoro()           # study mode: focus rounds and breaks (the server hooks up its announcements)
         self.media_opened_at = 0.0           # when a video/music site was last opened (hands-free gets stricter)
         self.desktop = desktop               # Desktop: click/type/keys in any app (None = only inside JARVIS's Edge)
         self.system = system                 # SystemControls: volume and screen brightness (None = not available)

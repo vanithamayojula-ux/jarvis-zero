@@ -108,7 +108,8 @@ def build(settings: Settings, mic_factory=None, speaker_factory=None, llm=None, 
     if isinstance(S.llm, CloudLLM) and settings.get("cloud_tts"):
         # Orpheus for chat replies; the local voice for command confirmations and when the free limit runs out
         tts = CloudTTS(tts, groq_key(), settings.get("cloud_tts_voice"),
-                       kind=lambda: getattr(getattr(S.engine, "conversation", None), "reply_kind", "chat"))
+                       kind=lambda: getattr(getattr(S.engine, "conversation", None), "reply_kind", "chat"),
+                       cues=lambda: settings.get("voice_cues") is not False)
     S.memory = Memory(DATA_DIR / "memory.json") if settings.get("memory") is not False else None
     S.engine = Engine(settings, vad_factory(), stt, S.llm, tts, tools, memory=S.memory, **kwargs)
     S.real_audio = mic_factory is None
@@ -119,6 +120,17 @@ def build(settings: Settings, mic_factory=None, speaker_factory=None, llm=None, 
     S.tel = TelephonyManager(settings, S.llm, stt, tts, vad_factory, S.engine.emit, tools=tools)
     S.reminders.on_due = lambda r: (S.engine.emit({"type": "reminder", "reminder": r}),
                                     S.engine.say_now(f"Reminder: {r['text']}."))
+    tools.pomodoro.on_phase = _pomodoro_phase
+
+
+def _pomodoro_phase(ev: dict) -> None:
+    """Study mode moved on (focus → break → focus): tell spidey, say it, and react with a meme. Runs on the timer's
+    thread, so the meme is handed to the event loop."""
+    S.engine.emit({k: v for k, v in ev.items() if k not in ("say", "moment")})
+    S.engine.say_now(ev["say"])
+    loop = getattr(S, "loop", None)
+    if loop is not None:
+        loop.call_soon_threadsafe(S.engine.conversation.react_moment, ev["moment"])
 
 
 def _load_voice_models() -> None:
@@ -160,6 +172,7 @@ def _load_wake_word() -> None:
 async def lifespan(app: FastAPI):
     if not getattr(S, "engine", None):
         build(Settings())
+    S.loop = asyncio.get_running_loop()
     await S.engine.start()
     await S.tel.start()
     S.hotkey = S.kill_switch = None
@@ -300,7 +313,8 @@ async def overlay():
             "looking": _looking(), "screen_reading": S.settings.get("screen_reading") is not False,
             "typing": (getattr(S.engine.conversation, "typing", None) or {}).get("where") or "",
             "tv": {"on": tv_on, "title": tv.showing.get("title", "") if tv_on else ""},
-            "memes": S.settings.get("memes") is not False,
+            "memes": S.settings.get("memes") is not False, "companion": S.settings.get("companion") is not False,
+            "pomodoro": S.engine.tools.pomodoro.status() if S.engine.tools else None,
             "cloud_reason": cloud.get("reason") or "", "media": {"playing": playing,
                                                                   "title": getattr(edge, "playing_title", "") if playing else ""}}
 
@@ -310,6 +324,22 @@ async def overlay_panel():
     """Ask the floating bot to show JARVIS's small panel (the start shortcut uses this instead of a browser tab)."""
     S.engine.emit({"type": "show_panel"})
     return {"ok": True}
+
+
+class ReactIn(BaseModel):
+    moment: str
+
+
+@app.post("/api/react", dependencies=[Depends(auth)])
+async def react(body: ReactIn):
+    """Spidey noticed something (two hours without a break, past midnight, a new morning): a mood and maybe a meme.
+    Only the fixed moments in memes.MOMENTS; no words from outside reach the meme model."""
+    from .memes import MOMENTS
+    if body.moment not in MOMENTS:
+        raise HTTPException(400, "unknown moment")
+    if S.settings.get("companion") is False:
+        return {"ok": False, "reason": "companion off"}
+    return {"ok": S.engine.conversation.react_moment(body.moment)}
 
 
 @app.get("/api/board/{bid}", dependencies=[Depends(auth)])
@@ -335,7 +365,8 @@ _RANGES = {"smart_turn_max_ms": (500, 6000), "followup_s": (0, 600), "followup_m
 _CHOICES = {"io_mode": {"chat", "voice"}, "search_provider": {"auto", "tavily", "brave", "serper"},
             "mode": {"push_to_talk", "hands_free"}, "activation": {"wake_word", "voice"},
             "cloud_tts_voice": {"troy", "austin", "daniel", "autumn", "diana", "hannah"},
-            "browser": {"edge", "chrome", "default"}, "tv_size": {"small", "medium", "large"}}
+            "browser": {"edge", "chrome", "default"}, "tv_size": {"small", "medium", "large"},
+            "meme_rate": {"always", "sometimes", "strong"}}
 _STT_MODELS = {"tiny.en", "base.en", "small.en", "medium.en", "tiny", "base", "small", "medium",
                "large-v3", "distil-small.en", "distil-medium.en", "distil-large-v3"}
 _TEL_RANGES = {"sip_port": (1024, 65535), "rtp_port_min": (1024, 65535), "rtp_port_max": (1024, 65535)}

@@ -16,6 +16,7 @@ import urllib.request
 BG = "#fffaf0"          # spidey's bubble colours
 EDGE = "#1a1a1a"
 HINT = "#8a8378"
+ACCENT = "#c0141f"
 FONT = "Segoe UI"
 MOOD_FACE = {"happy": "🙂", "laughing": "😂", "excited": "🤩", "proud": "😎", "love": "😍", "sad": "🥺", "tired": "😴",
              "annoyed": "😤", "confused": "🤔", "surprised": "😮", "thinking": "🧐", "smug": "😏", "scared": "😱",
@@ -26,6 +27,7 @@ MOOD_FACE = {"happy": "🙂", "laughing": "😂", "excited": "🤩", "proud": "�
 class MemePanel:
     MAX = 300                                 # the meme's longest side, at 100% scaling
     SHOW_S = 14                               # seconds on screen (longer while the mouse is on it)
+    KEEP = 10                                 # memes you can flip back to
     EX_STYLE = 0x08000000 | 0x80              # WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
 
     def __init__(self, root: tk.Tk, link, url: str, scale: float, place):
@@ -35,7 +37,10 @@ class MemePanel:
         self.shown = self.hovered = False
         self._photo = None
         self._hide_job = None
+        self._note_job = None
         self.last: dict = {}                  # what's showing: {"mood", "template"}
+        self.history: list[tuple[dict, object, bytes]] = []   # the last KEEP memes: (meta, picture, png) to flip back to
+        self.i = -1
         win = self.win = tk.Toplevel(root)
         win.overrideredirect(True)
         win.attributes("-topmost", True)
@@ -52,6 +57,16 @@ class MemePanel:
         self.mood_lbl.pack(side="left")
         close = tk.Label(foot, text="✕", bg=BG, fg=HINT, font=(FONT, 9), cursor="hand2")
         close.pack(side="right")
+        self.save_lbl = tk.Label(foot, text="Save", bg=BG, fg=ACCENT, font=(FONT, 8), cursor="hand2")
+        self.save_lbl.pack(side="right", padx=(0, int(8 * scale)))
+        self.save_lbl.bind("<Button-1>", lambda e: self.save())
+        self.next_lbl = tk.Label(foot, text="›", bg=BG, fg=EDGE, font=(FONT, 11), cursor="hand2")
+        self.count_lbl = tk.Label(foot, text="", bg=BG, fg=HINT, font=(FONT, 8))
+        self.prev_lbl = tk.Label(foot, text="‹", bg=BG, fg=EDGE, font=(FONT, 11), cursor="hand2")
+        for w in (self.next_lbl, self.count_lbl, self.prev_lbl):
+            w.pack(side="right", padx=(0, int(3 * scale)))
+        self.prev_lbl.bind("<Button-1>", lambda e: self.flip(-1))
+        self.next_lbl.bind("<Button-1>", lambda e: self.flip(1))
         for w in (self.pic, close):
             w.bind("<Button-1>", lambda e: self.hide())
         for w in (win, self.pic):
@@ -78,14 +93,16 @@ class MemePanel:
             if im.width * im.height > 4_000_000:
                 return
             im.load()
-            self.inbox.put((meta, im.convert("RGB")))
+            self.inbox.put((meta, im.convert("RGB"), png))
         except Exception:
             pass                               # a meme that didn't arrive just isn't shown
 
     def _poll(self):
         try:
             while True:
-                meta, im = self.inbox.get_nowait()
+                meta, im, png = self.inbox.get_nowait()
+                self.history = (self.history + [(meta, im, png)])[-self.KEEP:]
+                self.i = len(self.history) - 1
                 self._show(meta, im)
         except queue.Empty:
             pass
@@ -102,6 +119,10 @@ class MemePanel:
         mood = meta.get("mood") or ""
         self.mood_lbl.configure(text=f"{MOOD_FACE.get(mood, '🕷')}  Spidey feels {mood}" if mood else "🕷  Spidey")
         self.last = meta
+        many = len(self.history) > 1
+        self.count_lbl.configure(text=f"{self.i + 1}/{len(self.history)}" if many else "")
+        self.prev_lbl.configure(fg=EDGE if many and self.i > 0 else BG)
+        self.next_lbl.configure(fg=EDGE if many and self.i < len(self.history) - 1 else BG)
         win = self.win
         win.update_idletasks()
         w, h = win.winfo_reqwidth(), win.winfo_reqheight()
@@ -111,6 +132,41 @@ class MemePanel:
             win.deiconify()                    # without the focus: whatever you're typing in keeps it
             self.shown = True
         self._arm()
+
+    def flip(self, step: int) -> None:
+        """‹ › through the last few memes (the panel stays while you look)."""
+        if len(self.history) > 1:
+            self.i = max(0, min(len(self.history) - 1, self.i + step))
+            meta, im, _ = self.history[self.i]
+            self._show(meta, im)
+
+    def save(self) -> None:
+        """A copy of the meme on screen in Downloads (a new file each time; nothing is overwritten)."""
+        from datetime import datetime
+        from pathlib import Path
+        if not (0 <= self.i < len(self.history)):
+            return
+        meta, _, png = self.history[self.i]
+        try:
+            folder = Path.home() / "Downloads"
+            folder = folder if folder.is_dir() else Path.home()
+            name = (meta.get("template") or "meme").replace("_", " ")
+            path = folder / f"Spidey meme {name} {datetime.now():%Y-%m-%d %H%M%S}.png"
+            n = 2
+            while path.exists():
+                path = path.with_name(f"{path.stem} ({n}).png")
+                n += 1
+            path.write_bytes(png)
+            self._note("Saved to Downloads")
+        except Exception:
+            self._note("Couldn't save it")
+        self._arm()
+
+    def _note(self, text: str) -> None:
+        self.save_lbl.configure(text=text)
+        if self._note_job:
+            self.root.after_cancel(self._note_job)
+        self._note_job = self.root.after(2500, lambda: self.save_lbl.configure(text="Save"))
 
     def _arm(self) -> None:
         if self._hide_job:

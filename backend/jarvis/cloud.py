@@ -11,6 +11,7 @@ import json
 import logging
 import math
 import os
+import re
 import time
 import wave
 from typing import AsyncIterator
@@ -96,6 +97,29 @@ class CloudSTT:
         return self.local.transcribe(pcm16k, hint)
 
 
+# Orpheus performs these instead of reading them (tested 27 Oct by synthesising, then transcribing with Whisper:
+# against a plain 2.9 s line, [laugh] +1.4 s, [chuckle] +0.9 s, [sigh] +1.3 s of sound with no words; [cheerful] made
+# it brighter and quicker; [gasp] did next to nothing, so it isn't used). The text you see keeps "Haha"; only what the
+# cloud voice is given changes. One cue per sentence, never the local voice (Piper would read "[laugh]" out).
+_CUES = [
+    (re.compile(r"^(?:ha(?:ha)+|lol|lmao)\b[\s,!.]*", re.I), "[laugh] "),
+    (re.compile(r"^(?:heh|he(?:he)+|hah)\b[\s,!.]*", re.I), "[chuckle] "),
+    (re.compile(r"^(?:\*?sighs?\*?)\b[\s,!.]*", re.I), "[sigh] "),
+    (re.compile(r"^(?=(?:ugh+|oof|phew|ah man|aw+ man)\b)", re.I), "[sigh] "),
+    (re.compile(r"^(?=(?:no way|wow|whoa|yay|woo+|let'?s go|congrats|congratulations|amazing|awesome)\b)", re.I),
+     "[cheerful] "),
+]
+
+
+def vocal_cues(text: str) -> str:
+    """'Haha, the classic.' → '[laugh] the classic.'; 'Ugh, that's rough.' → '[sigh] Ugh, that's rough.'"""
+    for pattern, cue in _CUES:
+        if pattern.match(text):
+            rest = pattern.sub("", text, count=1)
+            return cue + (rest[:1].upper() + rest[1:] if rest else "")
+    return re.sub(r"(?<=[,.!?] )(?:ha(?:ha)+|lol)\b[,!.]*\s*", "[laugh] ", text, count=1, flags=re.I)
+
+
 class CloudTTS:
     """Groq's Orpheus voice (much more natural than Piper) for chat replies; the local voice for short command
     confirmations ("Opening Spotify."), which must be instant, and whenever the free limit (~100 a day) runs out.
@@ -104,8 +128,10 @@ class CloudTTS:
 
     sample_rate = 24000                                    # Orpheus' rate; the local voice is resampled to match
 
-    def __init__(self, local, key: str, voice: str = "troy", model: str = "canopylabs/orpheus-v1-english", kind=None):
+    def __init__(self, local, key: str, voice: str = "troy", model: str = "canopylabs/orpheus-v1-english", kind=None,
+                 cues=None):
         self.local, self.key, self.voice, self.model = local, key, voice, model
+        self.cues = cues or (lambda: True)                 # settings "voice_cues": laugh / sigh / cheerful in the voice
         self.voice_name = getattr(local, "voice_name", "")
         self.kind = kind or (lambda: "chat")
         self.client = httpx.Client(timeout=httpx.Timeout(10.0, connect=3.0))
@@ -124,7 +150,8 @@ class CloudTTS:
         if self.key and self.breaker.ok() and self.kind() == "chat":
             try:
                 r = self.client.post(f"{GROQ}/audio/speech", headers={"Authorization": f"Bearer {self.key}"},
-                                     json={"model": self.model, "input": spoken[:1000], "voice": self.voice,
+                                     json={"model": self.model, "input": (vocal_cues(spoken) if self.cues() else spoken)[:1000],
+                                           "voice": self.voice,
                                            "response_format": "wav"})
                 if r.status_code == 200:
                     pcm = _wav_pcm(r.content)
