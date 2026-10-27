@@ -28,5 +28,12 @@ jobs:
           cache: pip
       - name: Install dependencies
         run: python -m pip install -r requirements.txt
+      # Each failing test also becomes an annotation: `gh run view` shows those even where the full log can't be
+      # downloaded (the laptop's network blocks GitHub's log server).
       - name: Run tests
-        run: python -m pytest -q -p no:cacheprovider
+        run: |
+          python -m pytest -q -p no:cacheprovider -rf --tb=line 2>&1 | Tee-Object -FilePath pytest.txt
+          $code = $LASTEXITCODE
+          Select-String -Path pytest.txt -Pattern '^(FAILED .+|E\s+.+|[A-Za-z]:\\.+:\d+: .+)$' |
+            Select-Object -First 20 | ForEach-Object { "::error::$($_.Matches[0].Value)" }
+          exit $code
