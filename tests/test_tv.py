@@ -110,8 +110,14 @@ def test_rect_above_spidey_on_its_side():
 def test_rect_below_when_no_room_and_kept_on_screen():
     x, y, w, h = tvmod.tv_rect(WORK, 1.25, "large", spidey=(1800, 20))
     assert y == 20 + int(tvmod.SPIDEY * 1.25) + int(tvmod.GAP * 1.25) and x + w <= 1920 and w == 900
-    x, y, w, h = tvmod.tv_rect(WORK, 1.0, "large", anchor=(300, 200))     # grown from a corner near the edge
-    assert x == 0 and y == 0
+    # bigger: the corner nearest the screen's corner stays put (top-right here, so it grows down and left, not
+    # up over spidey); seen live on 27 Oct with spidey parked top-right and the TV just below it
+    x, y, w, h = tvmod.tv_rect(WORK, 1.0, "large", anchor=(1272, 225, 1912, 625))
+    assert (x + w, y) == (1912, 225) and (w, h) == (720, 437)
+    x, y, w, h = tvmod.tv_rect(WORK, 1.0, "large", anchor=(100, 700, 612, 1020))   # bottom-left stays bottom-left
+    assert (x, y + h) == (100, 1020)
+    x, y, w, h = tvmod.tv_rect(WORK, 1.0, "large", anchor=(1500, 600, 2012, 920))   # still kept on screen
+    assert x + w == 1920
     x, y, w, h = tvmod.tv_rect(WORK, 1.0, "medium")                        # no spidey: bottom-right corner
     assert x + w == 1920 - tvmod.GAP and y + h == 1032 - tvmod.GAP
 

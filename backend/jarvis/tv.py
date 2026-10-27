@@ -130,16 +130,19 @@ def find_video(query: str, client: httpx.Client | None = None) -> dict | None:
 
 
 def tv_rect(work: tuple[int, int, int, int], scale: float, size: str, spidey: tuple[int, int] | None = None,
-            anchor: tuple[int, int] | None = None) -> tuple[int, int, int, int]:
-    """Where the TV window goes (x, y, w, h), all in screen pixels. anchor = the bottom-right corner it had (it keeps
-    its place when it grows or shrinks); otherwise just above spidey, lined up with its outer side; otherwise the
-    bottom-right corner of the screen."""
+            anchor: tuple[int, int, int, int] | None = None) -> tuple[int, int, int, int]:
+    """Where the TV window goes (x, y, w, h), all in screen pixels. anchor = the window it is now (left, top, right,
+    bottom): when it grows or shrinks, the corner nearest the screen's corner stays put, so it grows away from the
+    edges (and never over spidey). Otherwise just above spidey (below it when there's no room), lined up with its
+    outer side; otherwise the bottom-right corner of the screen."""
     l, t, r, b = work
     pw, ph = SIZES.get(size, SIZES["medium"])
     w, h = int(pw * scale), int((ph + TITLE_BAR) * scale)
     gap = int(GAP * scale)
     if anchor:
-        x, y = anchor[0] - w, anchor[1] - h
+        al, at, ar, ab = anchor
+        x = ar - w if (al + ar) / 2 > (l + r) / 2 else al
+        y = ab - h if (at + ab) / 2 > (t + b) / 2 else at
     elif spidey:
         sx, sy = spidey
         sw = int(SPIDEY * scale)
@@ -250,9 +253,9 @@ class MiniTV(EdgeController):
             if keep_place and self.hwnd and u.IsWindow(self.hwnd):
                 r = wintypes.RECT()
                 u.GetWindowRect(self.hwnd, ctypes.byref(r))
-                anchor = (r.right, r.bottom)
+                anchor = (r.left, r.top, r.right, r.bottom)
             spidey = self._spidey()
-            ref = anchor or spidey or (u.GetSystemMetrics(0) - 1, u.GetSystemMetrics(1) - 1)
+            ref = (anchor[2], anchor[3]) if anchor else spidey or (u.GetSystemMetrics(0) - 1, u.GetSystemMetrics(1) - 1)
             work = _work_area(ref)
             try:
                 scale = u.GetDpiForSystem() / 96
