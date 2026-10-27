@@ -117,6 +117,7 @@ def build(settings: Settings, mic_factory=None, speaker_factory=None, llm=None, 
     S.engine.on_io_mode = lambda mode: threading.Thread(target=lambda: (_load_voice_models(), _warm_voice()),
                                                         daemon=True, name="voice-models").start() if mode == "voice" else None
     tools.summarize = S.engine.conversation.summarize
+    S.engine.conversation.say_later = S.engine.say_now          # the guide's next steps, spoken in voice mode
     S.tel = TelephonyManager(settings, S.llm, stt, tts, vad_factory, S.engine.emit, tools=tools)
     S.reminders.on_due = lambda r: (S.engine.emit({"type": "reminder", "reminder": r}),
                                     S.engine.say_now(f"Reminder: {r['text']}."))
@@ -397,8 +398,9 @@ def _check_allowed_commands(v, bad) -> None:
 # Settings that widen what JARVIS may do. The API never applies them by itself: they wait for a "yes" typed or said
 # in JARVIS (so a stray program or web page with the token still can't loosen the rules).
 _PROTECTED = {"allowed_commands", "site_allowlist", "approved_sites", "edge_open_any_site", "desktop_control",
-              "screen_to_cloud", "screen_reading"}
-_TIGHTENING = {"desktop_control", "edge_open_any_site", "screen_to_cloud", "screen_reading"}   # turning these OFF needs no question
+              "screen_to_cloud", "screen_reading", "guide_cloud_labels"}
+_TIGHTENING = {"desktop_control", "edge_open_any_site", "screen_to_cloud", "screen_reading",
+               "guide_cloud_labels"}                                    # turning these OFF needs no question
 
 
 def _split_protected(ch: dict) -> tuple[dict, dict]:

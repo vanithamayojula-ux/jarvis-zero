@@ -478,7 +478,7 @@ class Link(threading.Thread):
                         elif kind == "pomodoro":
                             self.pomodoro = ev
                             self.events.put(ev)
-                        elif kind in ("mood", "meme"):
+                        elif kind in ("mood", "meme", "guide"):
                             self.events.put(ev)
             except Exception:
                 pass
@@ -569,6 +569,8 @@ class Bot:
         self.panel = None                                       # JARVIS's small panel (jarvis_panel.Panel)
         self.board = None                                       # the picture board (jarvis_board.Board), made on first use
         self.memes = None                                       # the meme panel (jarvis_memes.MemePanel), made on first meme
+        self.island = None                                      # the floating island (jarvis_island.Island): the guide's steps
+        self.guiding = False                                    # a guide is running: spidey points instead of wandering
         self.quick_mood = ""                                    # the mood spidey just reacted with (the meme follows)
         self.target_ring = TargetRing(root)                     # the "where I will click" outline (made on first use)
         self.x, self.y = self._load_pos()
@@ -839,6 +841,30 @@ class Bot:
             from jarvis_board import Board
             self.board = Board(self.root, self.status, URL, self.s, self._board_spot)
         return self.board
+
+    def get_island(self):
+        """The floating island at the top of the screen (the guide's current step). Made once, then shown and hidden."""
+        if self.island is None:
+            from jarvis_island import Island
+            self.island = Island(self.root, self.status, self.s, work_area)
+        return self.island
+
+    def _point_at(self, rect):
+        """The guide's target: leap beside it and shoot a web onto it (the ring around it comes from Spidey's highlight
+        events). Only a picture on the screen: nothing is clicked."""
+        try:
+            l, t, r, b = (int(v) for v in rect)
+        except (TypeError, ValueError):
+            return
+        cx, cy = (l + r) // 2, (t + b) // 2
+        s, gap = self.s, int(70 * self.s)
+        wa = work_area(cx, cy) or (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        # stand to the side of it with the most room, a little above, so the web shoots across, not through spidey
+        x = l - self.w - gap if l - self.w - gap >= wa[0] else r + gap
+        y = min(max(cy - self.h // 2 - int(30 * s), wa[1]), wa[3] - self.h)
+        if self.perch:
+            self.perch = None
+        self.travel(x, y, "leap", then=lambda: self.root.after(120, lambda: self.shoot_web((cx, cy))))
 
     def get_memes(self):
         """The meme panel (spidey's reaction to each moment, as a meme). Made once, then shown and hidden."""
@@ -1112,6 +1138,18 @@ class Bot:
                 if ev.get("on"):
                     self.poke()
                     self.react("nod")
+                continue
+            if ev.get("type") == "guide":                       # the floating island: a step to show and point at
+                self.get_island().on_event(ev)
+                self.poke()
+                self.guiding = bool(ev.get("on")) and not ev.get("done")
+                target = ev.get("target") if ev.get("on") else None
+                if isinstance(target, dict) and target.get("rect"):
+                    self._point_at(target["rect"])
+                elif ev.get("done"):
+                    self.react("celebrate", awake=True)
+                if not ev.get("on"):
+                    self.root.after(1500, lambda: self.guiding or self.travel(*self.home, style="leap"))
                 continue
             if ev.get("type") == "pomodoro":                    # study mode moved on (the pill shows the time)
                 self.poke()
@@ -2581,7 +2619,7 @@ class Bot:
         quiet = state == "idle" and not (self.action or self.alert_text or self.drag or self.fling or self.sleepy
                                          or self.showcase or self.hovered or self.bubble is not None
                                          or self.bar is not None or self.ring is not None)
-        if quiet and self.wander.get() and away < 60 and t > self.next_wander:
+        if quiet and self.wander.get() and away < 60 and t > self.next_wander and not self.guiding:
             self.next_wander = t + random.uniform(30, 70)
             self._wander(t)
 

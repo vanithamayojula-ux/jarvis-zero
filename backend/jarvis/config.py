@@ -103,6 +103,8 @@ DEFAULTS: dict = {
     "memes": True,                       # reaction memes beside spidey ("stop the memes" turns them off)
     "meme_rate": "sometimes",            # always | sometimes (strong moods, plus about every third reply) | strong
     "companion": True,                   # break nudges, "go to sleep" late at night, a morning hello (spidey)
+    "guide": True,                       # "guide me to …": the floating island points at each next step (never clicks)
+    "guide_cloud_labels": True,          # the guide may send button / menu names (never box contents) to the cloud model
     "meme_model": "openai/gpt-oss-20b",  # the Groq model that picks memes (its own free limits, apart from chat)
     "screen_reading": True,            # read the current window when asked (UI Automation, then offline OCR); never leaves the laptop
     "screen_to_cloud": False,          # sending screen contents to a cloud model: off, and only ever by your say-so

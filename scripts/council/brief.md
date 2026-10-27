@@ -104,7 +104,17 @@ when they ask.
   locally with Pillow. Templates come from Imgflip's public list, are downloaded only from i.imgflip.com, verified as
   pictures and cached in data/memes. Without the cloud, a plain reaction picture for the mood is shown. The meme panel is a
   no-focus window beside spidey that hides after 14 s. Settings memes, meme_model; "stop the memes" / "memes on".
-- 1426 automated tests pass (3 skipped, including the real-OCR test with JARVIS_OCR_LIVE=1 and the real-Edge page-script
+- Since 27 Oct, round 2: the cloud voice performs [laugh]/[chuckle]/[sigh]/[cheerful] for "haha/hehe/ugh/no way"
+  (the text shown is unchanged). Memes come now and then (meme_rate). Study mode (pomodoro) with nudges, plus
+  spidey's break / late-night / morning nudges through POST /api/react (fixed moments only). Spidey sometimes reacts
+  to the mini TV's title. CI runs the tests on GitHub (windows-latest) on every push.
+- Since 27 Oct, the floating island guide ("guide me to …"): it reads the window's interactive control labels (names,
+  kinds, positions; each cut to 40 characters after redaction; never values, password/PIN/card boxes or private
+  windows), sends them fenced as data to the cloud model, and points at the next control (island step, spidey's web,
+  a ring refreshed every 1.5 s under its 2 s cap). It waits for the click by polling the mouse button and cursor
+  position only, then looks again. It never clicks or types and keeps no look past its step. Settings guide and
+  guide_cloud_labels (protected: turning it on via the API waits for a yes).
+- 1483 automated tests pass (3 skipped, including the real-OCR test with JARVIS_OCR_LIVE=1 and the real-Edge page-script
   test with JARVIS_JS_LIVE=1).
 
 ## Known gaps and pain points (from real use)

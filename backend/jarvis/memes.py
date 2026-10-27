@@ -149,6 +149,7 @@ MOMENTS = {
     "morning": ("Good morning, first time on the laptop today", "Morning! New day, let's go.", "happy"),
     "focus_done": ("I just finished a focus session", "Nice, round done! Take five.", "proud"),
     "break_done": ("My study break is over, back to work", "Break's over, back at it. You've got this.", "thinking"),
+    "guide_done": ("I finished doing something on my laptop with Spidey pointing the way", "Done! You did it.", "proud"),
 }
 
 

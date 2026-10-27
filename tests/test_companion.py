@@ -219,4 +219,4 @@ def test_react_endpoint(client):
     assert client.post("/api/react", json={"moment": "break"}).json()["ok"] is False
     info = client.get("/api/overlay").json()
     assert info["companion"] is False and info["pomodoro"]["phase"] == "off" and info["memes"] is True
-    assert set(memes.MOMENTS) == {"break", "night", "morning", "focus_done", "break_done"}
+    assert set(memes.MOMENTS) == {"break", "night", "morning", "focus_done", "break_done", "guide_done"}

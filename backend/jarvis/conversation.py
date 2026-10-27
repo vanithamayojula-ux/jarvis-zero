@@ -174,7 +174,7 @@ SEARCH_SITES = {"youtube", "amazon", "flipkart", "wikipedia", "github", "google"
                 "instagram", "swiggy"}
 
 _FILLER = re.compile(r"^(?:so|okay|ok|yeah|yes|yep|cool|well|um+|uh+|hey|hi|hello|no|nah|alright|right|now|just|please|"
-                     r"jarvis|can you hear me|are you (?:still )?there|are you listening|can you|could you|would you|will you|i want you to|i need you to|i'd like you to|"
+                     r"jarvis|spidey|spidy|can you hear me|are you (?:still )?there|are you listening|can you|could you|would you|will you|i want you to|i need you to|i'd like you to|"
                      r"go ahead and|i said|i asked you to)\b[\s,.!?]*", re.I)
 BROWSERS = r"(?:google\s+)?chrom(?:e|a|e\s+bed)|microsoft\s+edge|edge|firefox|brave|(?:the\s+|my\s+)?browser"
 OPEN_VERB = r"(?:open(?:\s+up)?|launch|start|go\s+to|pull\s+up|bring\s+up|show\s+me)"
@@ -798,6 +798,33 @@ _POMO_LEFT = re.compile(rf"^(?:how (?:much time|long|many minutes)(?: is| are)? 
                         rf"(?:{_POMO}|round|break|focus))?|{_POMO} status|how'?s (?:the|my) {_POMO} going)$")
 
 
+# The guide (the floating island): "guide me to change my wallpaper", "walk me through turning on night light",
+# "where do I click to change the language", "how do I add a printer on my laptop", "stop guiding"
+_GUIDE = re.compile(r"^(?:(?:can you\s+|please\s+)?(?:(?:guide|walk|talk)\s+me\s+(?:through(?:\s+how\s+to)?|how\s+to|to)|"
+                    r"take\s+me\s+through(?:\s+how\s+to)?)|"          # not "take me to …": that's "open" (sound settings)
+                    r"point\s+me\s+to|show\s+me\s+where\s+(?:to\s+click\s+to|i\s+(?:can|should)|to)|"
+                    r"where\s+do\s+i\s+(?:click|go)\s+to|help\s+me\s+find\s+(?:where\s+to)?)\s+(?P<g>.+)$|"
+                    r"^how\s+(?:do|can)\s+i\s+(?P<g2>.+?)\s+(?:on|in)\s+(?:my|this)\s+(?:laptop|computer|pc|screen|windows)$|"
+                    r"^how\s+(?:do|can)\s+i\s+(?P<g3>.+?)\s+here$")
+_GUIDE_STOP = re.compile(r"^(?:stop|end|cancel|quit|close)\s+(?:the\s+)?(?:guide|guiding|guidance|island|walkthrough)$|"
+                         r"^(?:stop guiding me|no more guiding)$")
+# while a guide runs: "next", "done", "what now" move it on; "stop" ends it
+GUIDE_NEXT = re.compile(r"^\W*(?:next|next step|what(?:'s| is)? next|what now|now what|done|did it|i did it|i clicked it|"
+                        r"okay next|ok next|go on|continue|look again)\W*$", re.I)
+GUIDE_END = re.compile(r"^\W*(?:stop|cancel|never ?mind|that'?s enough|i'?m good|got it,? thanks|thanks,? i got it)\W*$", re.I)
+
+
+def route_guide(t: str) -> list[tuple[str, dict]] | None:
+    if _GUIDE_STOP.match(t):
+        return [("guide_stop", {})]
+    m = _GUIDE.match(t)
+    if m:
+        goal = (m.group("g") or m.group("g2") or m.group("g3") or "").strip(" '\"?")
+        if goal and len(goal) <= 160:
+            return [("guide", {"goal": goal})]
+    return None
+
+
 def route_pomodoro(t: str) -> list[tuple[str, dict]] | None:
     if _POMO_STOP.match(t):
         return [("pomodoro", {"action": "stop"})]
@@ -944,7 +971,7 @@ def route_all(text: str, settings: Settings, find_app=None, spoken: bool = False
         return [("resume_actions", {})]          # only ever from what the person said (the interpreter can't use it)
     raw = re.sub(r"[.!?]+$", "", text.strip().lower())               # (clean_command eats a final "on")
     io = route_io_mode(clean_command(text)) or route_memes(clean_command(text)) or route_memes(raw) or \
-        route_pomodoro(clean_command(text)) or route_pomodoro(raw)
+        route_pomodoro(clean_command(text)) or route_pomodoro(raw) or route_guide(clean_command(text))
     if io:
         return io
     if HEAR_ME.match(text.strip()):
@@ -1741,6 +1768,8 @@ class Conversation:
         self.last_drawing = ""        # what was drawn last, for "draw it again"
         self._recent_memes: list[str] = []   # the last few meme templates shown (so the next one is different)
         self._meme_turn = 0                  # replies so far (meme_rate "sometimes": about every third one)
+        self.guide: dict | None = None       # the running guide: {"goal", "stop", "advance", "task"}
+        self.say_later = None                # set by the server: speak a line outside a turn (the guide's next steps)
 
     @property
     def pending(self) -> ToolResult | None:
@@ -1898,6 +1927,15 @@ class Conversation:
             async for s in self._typing_turn(user_text):
                 yield s
             return
+        if self.guide is not None and not self.guide["task"].done():    # a guide is running (the floating island)
+            if GUIDE_NEXT.match(user_text):
+                self.guide["advance"].set()
+                yield "Okay, let me look again."
+                return
+            if GUIDE_END.match(user_text):
+                self.guide["stop"].set()
+                yield "Okay, I'll stop guiding."
+                return
         if self.pending and self.pending.choices:  # waiting on "which one?"
             action, self.pending = self.pending, None
             picked = pick_choice(user_text, [name for name, _ in action.choices])
@@ -2248,6 +2286,15 @@ class Conversation:
             result = await self._tv(name, args)
         elif name == "pomodoro":
             result = self._pomodoro(args)
+        elif name == "guide":
+            result = await self._guide_start(args.get("goal", ""))
+        elif name == "guide_stop":
+            running = self.guide is not None and not self.guide["task"].done()
+            if running:
+                self.guide["stop"].set()
+            else:                                             # e.g. after a restart: clear a step left in the island
+                self._show({"type": "guide", "on": False, "step": "Okay, no guide running."})
+            result = ToolResult("Okay, I'll stop guiding." if running else "I'm not guiding anything right now.")
         elif name == "set_companion":
             on = bool(args.get("on"))
             self.settings.update({"companion": on})
@@ -2718,6 +2765,128 @@ class Conversation:
         return ToolResult(f"Study mode on: {pomo.focus_min} minutes of focus, then a {pomo.break_min} minute break. "
                           f"The time's on my little pill. Say “stop the pomodoro” to end it.")
 
+    async def _guide_start(self, goal: str) -> ToolResult:
+        """Start the guide in the background and answer with its first step (it carries on in the floating island)."""
+        import threading
+        goal = clean_label(goal, 160)
+        d = getattr(self.tools, "desktop", None)
+        if self.channel != "local":
+            return ToolResult("I can only guide you on the laptop itself.")
+        if self.settings.get("guide") is False:
+            return ToolResult("The guide is switched off in my settings.")
+        if d is None or self.settings.get("screen_reading") is False:
+            return ToolResult("I can't look at your screen in this setup, so I can't guide you.")
+        if self.settings.get("guide_cloud_labels") is False or not (getattr(self.llm, "cloud_only", None)
+                                                                  and getattr(self.llm, "key", None)):
+            return ToolResult("Guiding needs my cloud brain to see the names of the buttons on your screen, and that's "
+                              "off right now, so I can't guide you.")
+        if self.guide is not None and not self.guide["task"].done():
+            self.guide["stop"].set()                          # a new goal replaces the old one
+        first: asyncio.Future = asyncio.get_running_loop().create_future()
+        g = {"goal": goal, "stop": threading.Event(), "advance": threading.Event()}
+        g["task"] = asyncio.get_running_loop().create_task(self._guide_loop(g, first))
+        self.guide = g
+        try:
+            said = await asyncio.wait_for(asyncio.shield(first), 20.0)
+        except asyncio.TimeoutError:
+            said = "I'm still looking. I'll show the first step up top in a moment."
+        return ToolResult(said, data=True)
+
+    async def _guide_loop(self, g: dict, first: asyncio.Future) -> None:
+        """Look → work out the step → point → wait for the click → look again, until done, stopped or 15 steps.
+        Each look is dropped after its step; only the step sentences are kept (for "the steps so far")."""
+        from . import guide
+        from .desktop import window_process, window_title
+        d, steps, said_first = self.tools.desktop, [], False
+
+        def own(h: int) -> bool:
+            try:
+                return d.is_own_window(h, window_process(h), window_title(h))
+            except Exception:
+                return False
+
+        def tell(text: str) -> None:
+            nonlocal said_first
+            if not said_first:
+                said_first = True
+                if not first.done():
+                    first.set_result(text)
+            elif self.say_later and self.settings.get("io_mode") != "chat":
+                self.say_later(text)
+
+        hwnd = d.last_hwnd
+        end = "Okay, I've stopped guiding."
+        try:
+            for n in range(1, guide.MAX_STEPS + 1):
+                if g["stop"].is_set():
+                    break
+                fg = guide._foreground()
+                hwnd = fg if fg and not own(fg) else d.last_hwnd or hwnd
+                if not hwnd:
+                    end = "Click into the window you want help with, then ask me again."
+                    break
+                try:
+                    snap = await asyncio.to_thread(guide.snapshot, d, hwnd)
+                except PermissionError as exc:
+                    end = str(exc)
+                    break
+                self.tools.looking = (snap["app"], time.monotonic() + 3.0)     # the eye pill: "looking at Settings"
+                if self.notify and (look := self.tools.looking_now()):
+                    self.notify({"type": "looking", **look})
+                out = None
+                for _ in range(2):
+                    out = await self.llm.cloud_only(guide.prompt_for(g["goal"], steps, snap), max_tokens=220,
+                                                    temperature=0.2, timeout=12.0)
+                    if out or g["stop"].is_set():
+                        break
+                    await asyncio.sleep(2.0)
+                step = guide.parse_step(out or "", snap)
+                self._log("tool", f"guide step {n}: {len(snap['controls'])} controls looked at, "
+                                  f"{'target' if step and step['target'] else 'no target'}")   # never the labels
+                del snap                                                # the look is gone: nothing kept
+                if step is None:
+                    end = "I can't work out the next step right now. Try again in a moment?"
+                    break
+                target = step["target"]
+                self._show({"type": "guide", "on": True, "goal": g["goal"], "n": n, "step": step["step"],
+                            "done": step["done"], "target": {"rect": list(target["rect"]), "label": target["name"][:30]}
+                            if target else None})
+                tell(step["step"])
+                if step["done"]:
+                    end = ""
+                    self.react_moment("guide_done")
+                    await asyncio.sleep(4.0)                           # the island shows "done" for a moment
+                    break
+
+                def ring(t=target):
+                    if self.notify and t:
+                        self.notify({"type": "highlight", "rect": list(t["rect"]), "label": t["name"][:30], "ttl": 1.8})
+                how = await asyncio.to_thread(guide.wait_for_move, target["rect"] if target else None, hwnd,
+                                              g["stop"], g["advance"], guide.WAIT_CLICK_S, ring, 6, own)
+                if how == "stop":
+                    break
+                if how == "timeout":                                   # stop looking; wait for "next" without looking
+                    self._show({"type": "guide", "on": True, "goal": g["goal"], "n": n, "waiting": True,
+                                "step": "Still there? Say “next” when you're ready, or “stop guiding”.", "target": None})
+                    how = await asyncio.to_thread(guide.wait_for_move, None, hwnd, g["stop"], g["advance"], 600.0,
+                                                  None, 6, lambda h: True)
+                    if how in ("stop", "timeout"):
+                        end = "I've stopped guiding for now. Ask again whenever you like."
+                        break
+                steps.append(step["step"])
+                await asyncio.sleep(0.8)                               # let the window settle after the click
+            else:
+                end = "That's a lot of steps. Let's take a breather; ask me again from here if you still need help."
+        except Exception as exc:
+            self._log("tool", f"guide failed: {type(exc).__name__}: {exc}")
+            end = "Something went wrong while guiding. Want to try again?"
+        finally:
+            if not first.done():
+                first.set_result(end or "Done!")
+            elif end and said_first:
+                tell(end)
+            self._show({"type": "guide", "on": False, "step": end or "Done!"})
+
     def _watch_along(self, tv, title: str) -> None:
         """Spidey reacts to what's on the mini TV (only its title goes to the meme model), once it's been on a bit,
         and only if the same thing is still showing."""
@@ -2880,6 +3049,23 @@ class Conversation:
                     return
                 msgs.append({"role": "tool", "content": result.text})
             use_tools = False  # one tool round, then answer
+        if not entry["content"] and not stop:
+            # Now and then the model sends nothing at all (seen 22 and 27 Oct: a plain "yes" got a blank). One more
+            # try, without tools, before giving up; the same honesty filters apply.
+            plain = [m for m in msgs if m["role"] != "tool" and not m.get("tool_calls")]
+            if plain and plain[-1]["role"] == "user":
+                plain[-1] = {**plain[-1], "content": f"{plain[-1]['content']}\n\n(Reply in one or two short sentences.)"}
+            try:
+                text = (await self.llm.complete(plain)).strip()
+            except Exception:
+                text = ""
+            chunker = SentenceChunker()
+            for sentence in (chunker.feed(text + " ") + chunker.flush())[:cap]:
+                if is_robotic(sentence) or claims_action(sentence):
+                    continue
+                spoken.append(sentence)
+                entry["content"] = " ".join(spoken)
+                yield sentence
         if not entry["content"]:
             entry["content"] = ("I didn't get that as a command. Say it plainly, like “click the first video” or “open WhatsApp”."
                                 if _TOOL_HINT.search(last_user) or re.search(r"\b(click|type|play|scroll)\b", last_user, re.I)
