@@ -89,13 +89,38 @@ def foreground_root() -> int | None:
     return (u.GetAncestor(ctypes.c_void_p(fg), GA_ROOT) or fg) if fg else None
 
 
-def window_process(hwnd: int) -> str:
-    pid = wintypes.DWORD()
-    _user32().GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
+def _pid_name(pid: int) -> str:
     try:
-        return psutil.Process(pid.value).name().lower()
+        return psutil.Process(pid).name().lower()
     except Exception:
         return ""
+
+
+def window_process(hwnd: int) -> str:
+    """The program behind a window. Store apps (Calculator, Settings, Photos…) draw inside a frame owned by
+    ApplicationFrameHost.exe; the app is the process of the child window inside it, so that is what the rules see
+    (otherwise Settings would pass as "the frame host")."""
+    u = _user32()
+    pid = wintypes.DWORD()
+    u.GetWindowThreadProcessId(ctypes.c_void_p(hwnd), ctypes.byref(pid))
+    name = _pid_name(pid.value)
+    if name != "applicationframehost.exe":
+        return name
+    found: list[int] = []
+    proto = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+    def each(child, _):
+        cp = wintypes.DWORD()
+        u.GetWindowThreadProcessId(child, ctypes.byref(cp))
+        if cp.value and cp.value != pid.value:
+            found.append(cp.value)
+            return False
+        return True
+    try:
+        u.EnumChildWindows(ctypes.c_void_p(hwnd), proto(each), 0)
+    except Exception:
+        pass
+    return (_pid_name(found[0]) if found else "") or name
 
 
 def window_title(hwnd: int) -> str:
@@ -201,10 +226,11 @@ class Desktop:
                 "explorer.exe": "File Explorer", "code.exe": "VS Code", "cursor.exe": "Cursor"}
         return nice.get(proc) or (title.split(" - ")[-1].strip() if " - " in title else title) or proc.removesuffix(".exe")
 
-    def check_allowed(self, hwnd: int) -> None:
-        """A thin wrapper over the gate's window rules (gate.window_block) plus 'not JARVIS itself'."""
+    def check_allowed(self, hwnd: int, kind: str = "") -> None:
+        """A thin wrapper over the gate's window rules (gate.window_block) plus 'not JARVIS itself'.
+        kind "window" = only moving the window (an app you let Spidey open is enough); anything else = acting inside it."""
         proc, title = window_process(hwnd), window_title(hwnd)
-        why = self.gate.window_block(proc, title, None, hwnd=hwnd)
+        why = self.gate.window_block(proc, title, None, kind=kind, hwnd=hwnd)
         if why:
             raise DesktopError(why)
         if self.is_own_window(hwnd, proc, title):
@@ -364,14 +390,14 @@ class Desktop:
         except Exception:
             pass
 
-    def _ensure_foreground(self, hwnd: int) -> int:
+    def _ensure_foreground(self, hwnd: int, kind: str = "") -> int:
         """Before any key or click: the window must REALLY be in front, and that real foreground window must pass the
         same rules (a different window can steal focus between our check and our keystroke)."""
         ok = self.focus(hwnd)
         real = foreground_root()
         if real:
             proc, title = window_process(real), window_title(real)
-            why = self.gate.window_block(proc, title, None, hwnd=real)
+            why = self.gate.window_block(proc, title, None, kind=kind, hwnd=real)
             if why:
                 raise DesktopError(why)
             if self.is_own_window(real, proc, title):
@@ -796,11 +822,11 @@ class Desktop:
             return "the desktop"
         if not hwnd or not window_title(hwnd):
             raise DesktopError("I can't find that window any more.")
-        self.check_allowed(hwnd)
+        self.check_allowed(hwnd, "window")
         name = self.describe(hwnd)
         u = _user32()
         if verb in ("snap_left", "snap_right"):
-            self._ensure_foreground(hwnd)
+            self._ensure_foreground(hwnd, "window")
             self._press_chord(hwnd, ["win"], "left" if verb == "snap_left" else "right", "window", verb, label=name)
             return name
         self._authorize("window", hwnd, label=name, key=verb)

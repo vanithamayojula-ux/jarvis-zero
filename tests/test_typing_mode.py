@@ -212,4 +212,5 @@ def test_the_interpreter_cannot_start_it(settings):
     from jarvis.conversation import grounded  # noqa: F401  (the guard is in Conversation: typing_mode is excluded)
     import inspect
     from jarvis import conversation
-    assert '"typing_mode") for s in again' in inspect.getsource(conversation.Conversation._reply)
+    assert "INTERPRETER_NEVER for s in again" in inspect.getsource(conversation.Conversation._reply)
+    assert {"typing_mode", "resume_actions", "app_access"} <= conversation.INTERPRETER_NEVER

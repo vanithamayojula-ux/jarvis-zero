@@ -428,6 +428,8 @@ class Link(threading.Thread):
         self.memes_on = True                          # a meme pops up beside spidey after each reply
         self.companion = True                         # break nudges, "go to sleep", the morning hello
         self.pomodoro: dict = {}                      # study mode: {"phase", "round", "ends_at", …} ({} = off)
+        self.research: dict = {}                      # research mode: {"on", "n", "of", "where", "goal"} ({} = off)
+        self.task: dict = {}                          # a multi-step job or a web task: {"on", "n", "of", "step"} ({} = off)
 
     def note_looking(self, app: str, seconds: float = 3.0) -> None:
         self.looking_app, self.looking_until = str(app or "a window")[:30], time.monotonic() + max(0.0, min(seconds, 3.0))
@@ -480,6 +482,15 @@ class Link(threading.Thread):
                             self.events.put(ev)
                         elif kind in ("mood", "meme", "guide"):
                             self.events.put(ev)
+                        elif kind == "research":
+                            self.research = ev if ev.get("on") else {}
+                            self.events.put(ev)
+                        elif kind == "task":
+                            if ev.get("on") or ev.get("plan") or not self.task.get("plan"):
+                                self.task = ev if ev.get("on") else {}   # a web step inside a plan keeps the plan's pill
+                            self.events.put(ev)
+                        elif kind in ("apps_changed", "settings"):
+                            self.events.put({"type": "apps_changed"})      # the Apps list reloads (no settings copied)
             except Exception:
                 pass
             self.ws_ok = False
@@ -607,6 +618,7 @@ class Bot:
             self.chat_hotkey.active.title().replace("+", " + ") if self.chat_hotkey and self.chat_hotkey.active else ""
         self.menu.add_command(label="Chat with me" + (f"   ({combo})" if combo else ""), command=self.open_bar)
         self.menu.add_command(label="Open Spidey panel", command=self.open_panel)
+        self.menu.add_command(label="Apps Spidey may use…", command=lambda: (self.open_panel(), self.panel.open_apps()))
         self.menu.add_command(label="Picture board", command=lambda: self.get_board().open_empty())
         self.tv_var = tk.BooleanVar(root, value=False)
         self.menu.add_checkbutton(label="Mini TV", variable=self.tv_var,
@@ -1133,6 +1145,22 @@ class Bot:
             if ev.get("type") == "board_close":
                 if self.board is not None:
                     self.board.hide()
+                continue
+            if ev.get("type") == "task":                        # a multi-step job moved on (the pill shows it)
+                panel = self.panel if self.panel is not None and self.panel.alive else None
+                if panel and ev.get("plan"):
+                    panel.on_event(ev)
+                if ev.get("plan") and ev.get("on") and ev.get("n") == 1:
+                    self.poke()
+                    self.react("nod")
+                continue
+            if ev.get("type") in ("research", "apps_changed"):  # research mode's progress; the Apps list changed
+                panel = self.panel if self.panel is not None and self.panel.alive else None
+                if panel:
+                    panel.on_event(ev)
+                if ev.get("type") == "research" and (not ev.get("on") or not ev.get("n")):
+                    self.poke()
+                    self.react("nod" if ev.get("on") else "happy")
                 continue
             if ev.get("type") == "tv":                          # the mini TV came on (it's JARVIS's own window)
                 if ev.get("on"):
@@ -1852,6 +1880,17 @@ class Bot:
         if self.status.typing_where:                         # typing mode: everything said or typed goes into that app
             items.append(("typing", GLYPH["type"], f"typing into {self.status.typing_where} · end", ACCENT,
                           lambda: self.status.send("end")))      # a click on the pill ends typing mode
+        task = self.status.task
+        if task.get("on"):                                   # a multi-step job: which step of how many
+            label = f"{'step' if task.get('plan') else 'web'} {task.get('n') or 0}/{task.get('of') or '?'}" + (
+                f" · {str(task.get('step'))[:18]}" if task.get("step") else "")
+            items.append(("task", GLYPH["look"], label, ACCENT,
+                          lambda: self.status.send("how's the task going" if task.get("plan") else "stop")))
+        res = self.status.research
+        if res.get("on"):                                    # research mode: which page of how many
+            label = f"research {res.get('n') or 0}/{res.get('of') or '?'}" + (
+                f" · {str(res.get('where'))[:16]}" if res.get("where") else "")
+            items.append(("research", GLYPH["look"], label, ACCENT, lambda: self.status.send("how's the research going")))
         pomo = self.status.pomodoro
         if pomo.get("phase") in ("focus", "break") and pomo.get("ends_at"):   # study mode: the round's time left
             m, sec = divmod(max(0, int(float(pomo["ends_at"]) - time.time())), 60)

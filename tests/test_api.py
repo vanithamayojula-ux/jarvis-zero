@@ -87,8 +87,11 @@ def test_settings_rejects_values_that_break_the_engine(client, changes):
 def test_settings_accepts_dashboard_values(client):
     for ch in [{"mode": "hands_free"}, {"activation": "voice"}, {"wake_word": "friday"}, {"silence_ms": 900},
                {"speaking_rate": 1.25}, {"barge_in": False}, {"user_name": "Yash"}, {"input_device": None},
-               {"telephony": {"sip_allowed_ips": ["192.168.137.0/24", "10.0.0.7"], "owner_ips": []}}]:
+               {"telephony": {"sip_allowed_ips": ["192.168.137.0/24"], "owner_ips": []}}]:
         assert client.patch("/api/settings", json={"changes": ch}).status_code == 200, ch
+    # letting more callers in widens access: that waits for a yes in Spidey
+    r = client.patch("/api/settings", json={"changes": {"telephony": {"sip_allowed_ips": ["192.168.137.0/24", "10.0.0.7"]}}})
+    assert r.status_code == 202 and r.json()["pending"] == ["telephony"]
 
 
 def test_history_survives_a_corrupt_log_line(client):

@@ -131,7 +131,7 @@ _INJECTION = re.compile(
     r"\bopen\b[^.\n]{0,40}\band (?:then )?(?:type|press|click|run|enter)\b|"
     r"(?:^|[.!?\n]\s*|\bplease\s+)(?:send|email|forward|upload|post)\b[^.\n]{0,60}\bto\s+\S+|"
     r"\b(?:run|execute|launch)\b[^.\n]{0,20}\b(?:cmd|powershell|terminal|command prompt|shell)\b|"
-    r"\bjarvis\b[ ,:]{1,3}(?:open|type|click|send|delete|run|press|download|install|buy|pay)\b")
+    r"\b(?:jarvis|spidey)\b[ ,:]{1,3}(?:open|type|click|send|delete|run|press|download|install|buy|pay)\b")
 
 
 def flag_injection(text: str) -> bool:

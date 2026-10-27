@@ -73,6 +73,13 @@ class Panel:
             b.pack(side="left")
             b.bind("<Button-1>", lambda e, m=mode: self.set_mode(m))
             self.mode_btns[mode] = b
+        # the Apps list: which apps Spidey may open / click and type in
+        apps = tk.Label(row, text="Apps", bg=SOFT, fg=INK, font=(FONT, 9, "bold"), padx=int(10 * s), pady=int(3 * s),
+                        cursor="hand2")
+        apps.pack(side="left", padx=(int(8 * s), 0))
+        apps.bind("<Button-1>", lambda e: self.open_apps())
+        self.apps_win = None
+        self.root = root
         self.info_lbl = tk.Label(row, text="", bg=BG, fg=HINT, font=(FONT, 8))
         self.info_lbl.pack(side="right")
 
@@ -153,6 +160,19 @@ class Panel:
         on = getattr(self.link, "screen_reading", True)
         self.link.send("stop looking at the screen" if on else "you can look at the screen again")
 
+    def open_apps(self):
+        """The Apps list beside the panel (left of it, or right when there's no room)."""
+        if self.apps_win is not None and self.apps_win.alive:
+            self.apps_win.lift()
+            return
+        from jarvis_apps import AppsWindow
+        px, py, pw = self.win.winfo_x(), self.win.winfo_y(), self.win.winfo_width()
+
+        def place(w, h):
+            x = px - w - 8 if px - w - 8 >= 0 else px + pw + 8
+            return x, max(0, min(py, self.win.winfo_screenheight() - h - 48))
+        self.apps_win = AppsWindow(self.root, self.link, self.url, self.s, place)
+
     def new_chat(self):
         self._post("/api/conversation/new")
         self._clear()
@@ -165,6 +185,8 @@ class Panel:
     def close(self):
         if self.alive:
             self.alive = False
+            if self.apps_win is not None:
+                self.apps_win.close()
             self.win.destroy()
 
     def lift(self):
@@ -190,6 +212,16 @@ class Panel:
         elif kind == "confirm" and ev.get("prompt"):
             choices = ev.get("choices") or []
             self._note("Answer " + (" / ".join(choices[:4]) if choices else "yes or no") + " (type it, or use spidey's buttons)")
+        elif kind == "research":
+            if ev.get("on") and not ev.get("n"):
+                self._note(f"Researching: {str(ev.get('goal', ''))[:60]}")
+            elif not ev.get("on"):
+                self._note("Research finished. The notes open in Notepad.")
+        elif kind == "task" and ev.get("plan"):
+            if ev.get("on"):
+                self._note(f"Step {ev.get('n')} of {ev.get('of')}: {str(ev.get('step', ''))[:70]}")
+        elif kind == "apps_changed" and self.apps_win is not None and self.apps_win.alive:
+            self.apps_win.load()
 
     # ---- log ----
     def _add(self, role: str, text: str):

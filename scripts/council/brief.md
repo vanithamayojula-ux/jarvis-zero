@@ -114,8 +114,32 @@ when they ask.
   a ring refreshed every 1.5 s under its 2 s cap). It waits for the click by polling the mouse button and cursor
   position only, then looks again. It never clicks or types and keeps no look past its step. Settings guide and
   guide_cloud_labels (protected: turning it on via the API waits for a yes).
-- 1483 automated tests pass (3 skipped, including the real-OCR test with JARVIS_OCR_LIVE=1 and the real-Edge page-script
-  test with JARVIS_JS_LIVE=1).
+- Since 27 Oct evening, the Apps list (panel → Apps; apps.py): Windows' own app list (Get-StartApps + Start menu
+  shortcuts + Store manifests, cached in data/apps.json) with Off / Open / Full per program (settings app_permissions,
+  keyed by exe). The gate now refuses clicking/typing in any app not set to Full (app_access "list"; Notepad, Spotify,
+  Paint and Calculator are Full by default); Open allows only window moves; Off also blocks opening and reading.
+  Terminals, system tools, remote-control apps (Quick Assist, Parsec…), Power Automate, the on-screen keyboard and AI
+  coding agents (Claude, OpenCode, Antigravity) are locked. Store apps are now identified by their real process, not
+  ApplicationFrameHost (an unidentifiable frame is refused). Listed apps start via explorer.exe shell:AppsFolder\<id>.
+- Research mode ("research …"; research.py): DuckDuckGo then Bing HTML search (only the words go out), each result
+  read in a new tab of the clean Edge (scrolls, reads up to 6000 characters), notes by Groq gpt-oss-120b (side model,
+  own limits), follows only links that were on the page (by number), at most 2 pages per site, skips sign-in/banking
+  hosts, shorteners and bot-check pages, no link following from pages that try to give orders. Read only: no clicks,
+  no typing. Writes Documents\Spidey Notes\<date> <topic>.txt and opens it. Budget: research_pages (8, max 20), 12 min.
+- Settings holes closed the same day: approved_apps, shortcut_dirs, search_dirs, blocked_shortcuts, edge_profile,
+  notes_dir, app_access and widening telephony changes (owner_ips, sip_allowed_ips, sip_lan_enabled, sip_bind_host)
+  now wait for a yes; edge_profile must be a plain folder name; ollama_url must be loopback.
+- Later on 27 Oct, more intelligence (planner.py): "think harder" and hard questions by themselves go to gpt-oss-120b
+  with reasoning "high" (think_model, think_auto). Multi-step jobs: the model plans up to 8 steps (command / research
+  / web / think / write / ask / say) from the person's words only; command steps are re-routed through route_all,
+  must pass grounded() and can't be typing mode, resume, app grants or another plan; research and web results are
+  fenced data (written into a Notepad document or summed up, never turned into commands); confirmations pause the plan
+  until a yes; one re-plan on failure (page text never goes into it); 20 minute cap; "stop the task". A dropped
+  "remind me…" part is put back. Research: Answer + Comparison table + Key points summary, a gap check halfway, Bing
+  searched in the Edge tab when DuckDuckGo throttles (Bing fetched without a browser gave unrelated results), and
+  follow-up questions answered from the notes for 45 minutes. Browser agent: 25 looks / 6 minutes, "search" (Enter
+  only in a real search box, words mostly from the request), "back", and "found" notes carried between pages as data.
+- 1582 automated tests pass (2 skipped). A few timing tests (local voices, engine) can fail when the laptop is busy.
 
 ## Known gaps and pain points (from real use)
 1. Indian names are misheard (Hanumankind, Arijit Singh). Partly fixed with name hints and a fuzzy name fixer.

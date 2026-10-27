@@ -99,6 +99,10 @@ def build(settings: Settings, mic_factory=None, speaker_factory=None, llm=None, 
     if mic_factory is None:
         from .memes import MemeMaker                        # spidey's meme reactions (templates kept in data/memes)
         tools.memes = MemeMaker(DATA_DIR / "memes")
+    if mic_factory is None and sys.platform == "win32":
+        from .apps import catalog                           # the laptop's apps, for the Apps list (found in the background)
+        tools.catalog = catalog()
+        tools.catalog.refresh_soon()
     if desktop is not None:
         # the "this is where I will click" ring: the rectangle was already checked (highlight.validate_highlight)
         desktop.on_target = lambda rect, label: S.engine.emit(
@@ -359,11 +363,33 @@ async def get_settings():
     return S.settings.all()
 
 
+@app.get("/api/apps", dependencies=[Depends(auth)])
+async def list_apps(refresh: bool = False):
+    """The panel's Apps list: every app Windows knows about, and what Spidey may do with each (off / open / full).
+    Changing a level goes through PATCH /api/settings (app_permissions), where anything that widens it waits for a yes."""
+    from .apps import level_of, perm_key
+    tools = S.engine.tools
+    cat = getattr(tools, "catalog", None) if tools else None
+    if cat is None:
+        return {"apps": [], "scanning": False, "access": S.settings.get("app_access")}
+    if refresh or not cat.apps():
+        await asyncio.to_thread(cat.refresh)
+    out = []
+    for a in cat.apps():
+        key = perm_key(a)
+        # already openable by name before the list existed ("open chrome" via approved_apps / a Desktop shortcut)?
+        openable = bool(tools._find_app(a["name"])) if a["kind"] != "locked" else False
+        level = "off" if a["kind"] == "locked" else level_of(S.settings, key, openable=openable)
+        out.append({**a, "key": key, "level": level, "chosen": key in (S.settings.get("app_permissions") or {})})
+    return {"apps": out, "scanning": cat.scanning, "at": cat.scanned_at, "access": S.settings.get("app_access")}
+
+
 _RANGES = {"smart_turn_max_ms": (500, 6000), "followup_s": (0, 600), "followup_min_confidence": (0, 1), "echo_coupling": (0, 5), "echo_margin": (1, 20),
            "noise_floor": (0, 0.5), "vad_threshold": (0.05, 0.99), "silence_ms": (150, 5000), "hold_ms": (0, 5000),
            "max_utterance_s": (2, 120), "history_turns": (1, 50), "speaking_rate": (0.5, 2.0),
-           "edge_debug_port": (0, 65535)}
+           "edge_debug_port": (0, 65535), "research_pages": (1, 20)}
 _CHOICES = {"io_mode": {"chat", "voice"}, "search_provider": {"auto", "tavily", "brave", "serper"},
+            "app_access": {"list", "any"},
             "mode": {"push_to_talk", "hands_free"}, "activation": {"wake_word", "voice"},
             "cloud_tts_voice": {"troy", "austin", "daniel", "autumn", "diana", "hannah"},
             "browser": {"edge", "chrome", "default"}, "tv_size": {"small", "medium", "large"},
@@ -397,16 +423,43 @@ def _check_allowed_commands(v, bad) -> None:
 
 # Settings that widen what JARVIS may do. The API never applies them by itself: they wait for a "yes" typed or said
 # in JARVIS (so a stray program or web page with the token still can't loosen the rules).
+# (Also: which apps it may start or control, where it looks for files and shortcuts, which Edge profile it drives,
+# the research notes folder, and who may phone in.)
 _PROTECTED = {"allowed_commands", "site_allowlist", "approved_sites", "edge_open_any_site", "desktop_control",
-              "screen_to_cloud", "screen_reading", "guide_cloud_labels"}
+              "screen_to_cloud", "screen_reading", "guide_cloud_labels", "app_permissions", "app_access", "approved_apps",
+              "shortcut_dirs", "search_dirs", "blocked_shortcuts", "edge_profile", "notes_dir", "browser_control", "research"}
 _TIGHTENING = {"desktop_control", "edge_open_any_site", "screen_to_cloud", "screen_reading",
-               "guide_cloud_labels"}                                    # turning these OFF needs no question
+               "guide_cloud_labels", "browser_control", "research"}     # turning these OFF needs no question
+_TEL_PROTECTED = {"sip_lan_enabled", "sip_allowed_ips", "owner_ips", "sip_bind_host", "record_calls"}
 
 
 def _split_protected(ch: dict) -> tuple[dict, dict]:
+    from .apps import tightening
     direct, protected = {}, {}
     for k, v in ch.items():
-        (direct if k not in _PROTECTED or (k in _TIGHTENING and v is False) else protected)[k] = v
+        if k == "app_permissions":
+            ok = tightening(S.settings.get("app_permissions") or {}, v)    # only lowering levels: no question needed
+        elif k == "app_access":
+            ok = v == "list"
+        elif k == "telephony":
+            old = S.settings.get("telephony") or {}
+
+            def narrower(tk, tv) -> bool:
+                if tk in ("sip_lan_enabled", "record_calls"):
+                    return tv is False
+                if tk == "sip_bind_host":
+                    return tv == "127.0.0.1"
+                return isinstance(tv, list) and set(tv) <= set(old.get(tk) or [])    # fewer callers allowed, never more
+            widen = {tk: tv for tk, tv in v.items() if tk in _TEL_PROTECTED and not narrower(tk, tv)}
+            if widen:
+                protected["telephony"] = widen
+            rest = {tk: tv for tk, tv in v.items() if tk not in widen}
+            if rest:
+                direct["telephony"] = rest
+            continue
+        else:
+            ok = k not in _PROTECTED or (k in _TIGHTENING and v is False)
+        (direct if ok else protected)[k] = v
     return direct, protected
 
 
@@ -419,6 +472,9 @@ def _propose_protected(changes: dict) -> str:
         guard = getattr(getattr(S.engine.tools, "edge", None), "guard", None)
         if guard is not None and "site_allowlist" in changes:
             guard.allow = {a.lower().strip() for a in changes["site_allowlist"] if a}
+        loop = getattr(S, "loop", None)
+        if (changes.get("telephony") or {}).get("sip_lan_enabled") and loop is not None:
+            asyncio.run_coroutine_threadsafe(S.tel.enable_sip_lan(), loop)
         S.audit.record(Action(kind="setting", label=names), Decision("allow"), "applied")
         S.engine.emit({"type": "settings", "settings": S.settings.all()})
         return ToolResult(f"Done, I changed {names}.")
@@ -469,8 +525,29 @@ def _validate_settings(ch: dict) -> None:
                 parse(str(v))
             except ValueError as exc:
                 bad(str(exc))
-        elif key == "ollama_url" and not (isinstance(v, str) and re.match(r"^https?://[\w.\-]+(:\d+)?/?$", v)):
-            bad("ollama_url must look like http://127.0.0.1:11434")
+        elif key == "ollama_url" and not (isinstance(v, str) and
+                                          re.match(r"^http://(?:127\.0\.0\.1|localhost|\[::1\])(:\d+)?/?$", v)):
+            # the local model gets the whole conversation: it may only ever be this laptop
+            bad("ollama_url must be on this laptop, like http://127.0.0.1:11434")
+        elif key == "edge_profile" and not (isinstance(v, str) and re.fullmatch(r"[a-z0-9][a-z0-9-]{0,39}", v)):
+            bad("edge_profile must be a short folder name inside data/ (letters, digits and dashes)")
+        elif key == "app_permissions":
+            from .apps import LEVELS
+
+            def key_ok(k2) -> bool:
+                return isinstance(k2, str) and bool(
+                    (re.fullmatch(r"[\w .+()&'＆-]{1,80}\.exe", k2) and k2 == k2.lower()) or
+                    re.fullmatch(r"id:[\w .{}()\-\\!~+,＆]{1,200}", k2))
+            if not (isinstance(v, dict) and len(v) <= 600 and all(key_ok(k2) and x in LEVELS for k2, x in v.items())):
+                bad("app_permissions must map program names (like spotify.exe) to off, open or full")
+            from .apps import LOCKED_EXES
+            if any(k2 in LOCKED_EXES and x != "off" for k2, x in v.items()):
+                bad("terminals, system tools, AI agents and remote-control apps can't be given to Spidey")
+        elif key in ("shortcut_dirs", "search_dirs") and not (
+                isinstance(v, list) and len(v) <= 10 and all(isinstance(x, str) and 0 < len(x) <= 260 for x in v)):
+            bad(f"{key} must be a list of up to 10 folders")
+        elif key == "notes_dir" and not (isinstance(v, str) and 3 <= len(v) <= 260 and re.match(r"^[A-Za-z]:\\", v)):
+            bad("notes_dir must be a full folder path like C:\\Users\\you\\Documents\\Spidey Notes")
         elif key == "user_name" and not (isinstance(v, str) and len(v) <= 60):
             bad("user_name must be text (up to 60 characters)")
         elif key == "name_hints" and not (isinstance(v, list) and len(v) <= 60 and

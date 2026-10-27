@@ -100,6 +100,11 @@ Before speaking, text is lightly normalised so symbols aren't read aloud: `32°C
 | Call status, duration, errors, history | ✅ | ✅ | |
 | **Real phone calls to ordinary numbers (PSTN)** | ❌ **Disabled** | — | See below |
 | Emergency stop | ✅ | ✅ | |
+| **Apps list** (panel → Apps) | ✅ | ✅ | Every app on the laptop with Off / Open / Full. Full = Spidey may click and type in it (never password/card boxes; Send/Buy/Delete still ask). Giving more access waits for your "yes"; taking it away is instant. Terminals, system tools, remote-control apps and AI coding agents are locked |
+| **Multi-step jobs** ("research X, put the best 3 in Notepad and remind me tomorrow at 9", "plan: …") | ✅ | ❌ (Groq) | The thinking model plans up to 8 steps (commands, research, a web task, think, write a Notepad document, ask you, tell you) and does them one by one in the background. Every command goes through the normal router and confirmations and must be in your own words; what pages say is only ever data. "stop the task", "how's the task going" |
+| **Think harder** ("think harder", or by itself for hard questions) | ✅ | ❌ (Groq) | Plans, maths, code and decisions go to gpt-oss-120b with deep reasoning (2–5 s). `think_auto` turns the automatic part off |
+| **Research mode** ("research …") | ✅ | ❌ (web + Groq) | Notes start with a direct answer and, when comparing, a table; it checks for gaps halfway and searches again; ask follow-ups ("which one has the best battery?") for 45 minutes after. |
+| Research details | | | Searches, opens each result in Spidey's own signed-out Edge (a tab of its own), scrolls and reads it, follows up to 2 pages per site, writes notes + a summary to `Documents\Spidey Notes\*.txt` and opens it in Notepad. Read only: it never clicks, types or signs in. 8 pages by default (`research_pages`, up to 20), 12 minute limit, "stop the research" |
 
 ## Phone calls, honestly
 
@@ -142,6 +147,10 @@ Before speaking, text is lightly normalised so symbols aren't read aloud: `32°C
 - The SIP endpoint is off by default. When on, it drops packets from any IP outside the allowlist (default: only the Windows Mobile Hotspot subnet `192.168.137.0/24` and this PC). The firewall rules from `setup-phone.ps1` open it on Private networks only.
 - Everything (settings, transcripts, reminders) stays in `data/`, which is git-ignored. Turn off transcript saving in Settings.
 - No voice cloning. Spidey identifies itself as an AI on calls and when asked.
+- Not everything stays on the laptop: with a Groq key, what you say or type goes to Groq's cloud model, and in research
+  mode the text of the public pages it reads goes there too. Screen contents don't (`screen_to_cloud` is off).
+- Settings that widen what Spidey may do (app permissions, app and folder lists, the Edge profile folder, who may phone
+  in) wait for a "yes" typed or said to Spidey. The local model's address must be on this laptop.
 
 ## Tests
 

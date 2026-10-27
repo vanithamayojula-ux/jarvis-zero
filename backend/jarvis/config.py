@@ -92,7 +92,18 @@ DEFAULTS: dict = {
     "edge_open_any_site": True,          # in that clean Edge, open any website without asking first (blocklists apply)
     "site_allowlist": [],                # sites you've decided are safe even if a blocklist disagrees
     "blocklist_auto_update": True,       # refresh the free malware/phishing/scam lists once a week
-    "desktop_control": True,             # click / type / press keys in any app (never terminals, password boxes…)
+    "desktop_control": True,             # click / type / press keys in apps you allowed (never terminals, password boxes…)
+    # What Spidey may do in each app, by program: off | open (open it, move its window) | full (also click and type).
+    # Set in the panel's Apps list; anything that widens this waits for your "yes". No choice yet = no clicking/typing.
+    "app_permissions": {"notepad.exe": "full", "spotify.exe": "full", "mspaint.exe": "full", "calculatorapp.exe": "full"},
+    "app_access": "list",                # list = only the apps above get control | any = every app the gate doesn't block
+    "research": True,                    # "research X": browse many sites in my own Edge, read them, write notes
+    "research_pages": 8,                 # how many pages one research run reads (up to 20)
+    "research_model": "openai/gpt-oss-120b",   # the Groq model that takes the notes (its own free limits, apart from chat)
+    "think_model": "openai/gpt-oss-120b",      # "think harder", the planner and research summaries (reasons before answering)
+    "think_auto": True,                  # hard questions (plans, maths, code, decisions) go to the thinking model by themselves
+    "planner": True,                     # several-step requests are planned and done one step at a time
+    "notes_dir": str(Path(_known_folder(0x05, "Documents")) / "Spidey Notes"),   # where research notes are written
     "kill_hotkey": "ctrl+alt+backspace", # emergency stop: freezes every click and key until you say "resume"
     "insecure_no_token": False,          # tests only: lets the API run with no secret token (never settable by the API)
     "highlight_actions": True,           # draw a ring where JARVIS is about to click (display only; spidey draws it)

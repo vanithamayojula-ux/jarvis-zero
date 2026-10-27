@@ -306,7 +306,7 @@ JS_SNAPSHOT = r"""
     }
   });
   return {title: document.title, url: location.href, elements: out,
-          text: clean((document.querySelector('main, form, [role="main"]') || document.body).innerText).slice(0, 900)};
+          text: clean((document.querySelector('main, form, [role="main"]') || document.body).innerText).slice(0, 2000)};
 })()
 """
 
@@ -1002,6 +1002,14 @@ class EdgeController:
                          ("Input.dispatchMouseEvent", {**ev, "type": "mouseReleased"})])
         return hit
 
+    # ---------- research mode: one tab of its own, read only (never a click or a key) ----------
+    def research_tab(self) -> "ResearchTab":
+        """A new tab for a research run, so a video or page you have open is never navigated away."""
+        self.ensure_running()
+        page = self._http("/json/new?about:blank", method="PUT")
+        self._focus_window(page)
+        return ResearchTab(self, page["id"])
+
     def _fx(self, page: dict, mode: str, el_id=0, x: float = 0, y: float = 0) -> None:
         """The visible ripple / outline. Never allowed to break the action itself."""
         try:
@@ -1031,3 +1039,44 @@ class EdgeController:
     def status(self) -> dict:
         return {"installed": bool(self.edge_path), "running": self.running(), "port": self.port,
                 "profile": str(self.profile_dir)}
+
+
+class ResearchTab:
+    """The tab a research run reads in: open the next address, read the text, scroll, list the links, show a banner.
+    Nothing here clicks, types or presses a key. Every address goes through the blocklists first."""
+
+    def __init__(self, edge: EdgeController, page_id: str):
+        self.edge, self.page_id = edge, page_id
+
+    def _page(self) -> dict:
+        page = next((p for p in self.edge.pages() if p.get("id") == self.page_id), None)
+        if page is None:
+            raise BrowserError("The research tab was closed.")
+        return page
+
+    def open_url(self, url: str) -> str:
+        self.edge.check_url(url)
+        self.edge._cdp(self._page(), [("Page.navigate", {"url": url})])
+        return urlparse(url).hostname or url
+
+    def read(self, offset: int = 0) -> dict:
+        return self.edge._eval(self._page(), f"{JS_READ}({max(0, int(offset))})") or {}
+
+    def scroll(self, direction: str) -> None:
+        amount = {"down": 700, "up": -700, "top": -10**7, "bottom": 10**7}.get(direction, 700)
+        self.edge._eval(self._page(), f"window.scrollBy({{top: {amount}, behavior: 'smooth'}})")
+
+    def links(self) -> list[dict]:
+        from .research import JS_LINKS
+        return self.edge._eval(self._page(), JS_LINKS) or []
+
+    def banner(self, text: str | None) -> None:
+        try:
+            self.edge._eval(self._page(), f"{JS_BANNER}({'true' if text else 'false'}, {json.dumps(text or '')})")
+        except Exception:
+            pass
+
+    def results(self) -> list[dict]:
+        """A search results page's organic results (title + link), for research mode's own searches."""
+        from .research import JS_RESULTS
+        return self.edge._eval(self._page(), JS_RESULTS) or []

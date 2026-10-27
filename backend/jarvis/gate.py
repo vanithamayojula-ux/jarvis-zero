@@ -32,14 +32,25 @@ BLOCKED_PROCESSES = {"cmd.exe", "powershell.exe", "pwsh.exe", "windowsterminal.e
                      "wt.exe", "powershell_ise.exe", "wscript.exe", "cscript.exe", "mshta.exe", "mstsc.exe",
                      "systemsettings.exe", "control.exe", "searchhost.exe", "startmenuexperiencehost.exe",
                      "anydesk.exe", "teamviewer.exe", "keepass.exe", "keepassxc.exe", "bitwarden.exe",
-                     "1password.exe", "lastpass.exe", "dashlane.exe", "nordpass.exe", "enpass.exe", "roboform.exe"}
+                     "1password.exe", "lastpass.exe", "dashlane.exe", "nordpass.exe", "enpass.exe", "roboform.exe",
+                     # remote control, automation that runs anything, a keyboard that types into every window
+                     "quickassist.exe", "parsecd.exe", "rustdesk.exe", "pad.console.host.exe", "osk.exe",
+                     "git-bash.exe", "git-cmd.exe",
+                     # AI coding agents that run commands for whoever types to them: typing there could run anything
+                     "claude.exe", "opencode.exe", "antigravity.exe", "antigravity ide.exe", "codex.exe", "windsurf.exe"}
 BLOCKED_NAMES = {"cmd.exe": "Command Prompt", "powershell.exe": "PowerShell", "pwsh.exe": "PowerShell",
                  "windowsterminal.exe": "the terminal", "wt.exe": "the terminal", "openconsole.exe": "the terminal",
                  "conhost.exe": "the terminal", "regedit.exe": "Registry Editor", "taskmgr.exe": "Task Manager",
                  "sechealthui.exe": "Windows Security", "mmc.exe": "that system console",
                  "systemsettings.exe": "Windows Settings", "control.exe": "Control Panel",
                  "mstsc.exe": "Remote Desktop", "anydesk.exe": "remote control software",
-                 "teamviewer.exe": "remote control software"}
+                 "teamviewer.exe": "remote control software", "quickassist.exe": "Quick Assist",
+                 "parsecd.exe": "remote control software", "rustdesk.exe": "remote control software",
+                 "pad.console.host.exe": "Power Automate", "osk.exe": "the on-screen keyboard",
+                 "git-bash.exe": "the terminal", "git-cmd.exe": "the terminal", "claude.exe": "an AI agent that runs commands",
+                 "opencode.exe": "an AI agent that runs commands", "antigravity.exe": "an AI agent that runs commands",
+                 "antigravity ide.exe": "an AI agent that runs commands", "codex.exe": "an AI agent that runs commands",
+                 "windsurf.exe": "an AI agent that runs commands"}
 # Clicking a button with one of these words is asked about first.
 CONFIRM_WORDS = ("send", "post", "comment", "reply", "submit", "publish", "tweet", "share", "upload", "buy", "pay",
                  "purchase", "order", "checkout", "delete", "remove", "uninstall", "install", "format", "erase", "reset",
@@ -111,7 +122,7 @@ SAY_READ_PRIVATE = "That looks like a sign-in, payment, banking or private windo
 READ_DENY_PROCESSES = {"keepass.exe", "keepassxc.exe", "bitwarden.exe", "1password.exe", "lastpass.exe", "dashlane.exe",
                        "nordpass.exe", "enpass.exe", "roboform.exe", "keeper.exe", "protonpass.exe", "sechealthui.exe",
                        "consent.exe", "credentialuibroker.exe", "lockapp.exe", "logonui.exe", "mstsc.exe", "anydesk.exe",
-                       "teamviewer.exe", "authenticator.exe"}
+                       "teamviewer.exe", "authenticator.exe", "quickassist.exe", "parsecd.exe", "rustdesk.exe"}
 _PASSWORD_MANAGER_TITLE = re.compile(r"keepass|bitwarden|1password|lastpass|dashlane|nordpass|enpass|roboform|proton pass|"
                                      r"password manager|authenticator|windows security", re.I)
 # banks, wallets and one-time codes by name (Indian banks included), whatever program shows them
@@ -133,6 +144,18 @@ _SENSITIVE_HOST_PREFIX = re.compile(r"^(?:login|signin|sign-in|accounts?|auth|ss
 _READ_PREFIX = re.compile(r"^\s*(?:sign[ -]?in|log[ -]?in|login|checkout|secure checkout|payment|pay now)\b(?!\.\w)", re.I)
 _CLICKABLE_BUTTONS = {"button", "splitbutton", "menuitem", "hyperlink"}
 _LEGACY_BUTTONS = {"button", "splitbutton", "menuitem"}
+
+
+_APP_NAMES = {"spotify.exe": "Spotify", "notepad.exe": "Notepad", "msedge.exe": "Edge", "chrome.exe": "Chrome",
+              "explorer.exe": "File Explorer", "code.exe": "VS Code", "cursor.exe": "Cursor", "mspaint.exe": "Paint",
+              "calculatorapp.exe": "Calculator", "winword.exe": "Word", "excel.exe": "Excel", "powerpnt.exe": "PowerPoint",
+              "brave.exe": "Brave", "opera.exe": "Opera", "ms-teams.exe": "Teams", "whatsapp.root.exe": "WhatsApp"}
+
+
+def app_label(proc: str) -> str:
+    """'spotify.exe' → 'Spotify', 'blender.exe' → 'Blender' (for saying it out loud)."""
+    proc = (proc or "").lower()
+    return _APP_NAMES.get(proc) or proc.removesuffix(".exe").replace("_", " ").title() or "that app"
 
 
 def _host_of(address: str) -> str:
@@ -258,6 +281,12 @@ class Gate:
             self._cache[ck] = (now, static)
         if static:
             return static
+        if proc == "applicationframehost.exe" and kind != "window":
+            # a Store app's frame whose app couldn't be found (asleep in the background): it could be Settings
+            return "I can't tell which app that window is. Click on it once, then ask me again."
+        why = self._app_block(proc, kind)
+        if why:
+            return why
         blob = _blob(focused)
         enter = key.lower() == "enter"
         if proc == "explorer.exe" and (kind == "type" or (kind in ("key", "combo") and enter)):
@@ -266,6 +295,21 @@ class Gate:
         if proc in EDITOR_PROCESSES and kind in ("type", "key", "combo") and ("terminal" in blob or "xterm" in blob):
             return "That's the terminal inside the editor, so I won't type there."
         return None
+
+    def _app_block(self, proc: str, kind: str) -> str | None:
+        """Your own choice for this app (the panel's Apps list): "full" may click and type, "open" may only move its
+        window around, "off" or no choice yet: nothing. settings app_access "any" = every app not blocked above."""
+        if self.settings is None or not self.strict or not proc or self.settings.get("app_access") == "any":
+            return None
+        from .apps import level_of
+        level = level_of(self.settings, proc)
+        if level == "full" or (level == "open" and kind == "window"):
+            return None
+        name = app_label(proc)
+        if level == "open":
+            return (f"You've let me open {name}, but not click or type in it. To change that, give me full control of it "
+                    f"in the panel's Apps list.")
+        return f"I don't have your permission to use {name} yet. You can allow it in the panel's Apps list."
 
     def _static_block(self, proc: str, title: str, typing: bool) -> str | None:
         if proc in BLOCKED_PROCESSES or (proc == "explorer.exe" and title == "Run"):
@@ -310,6 +354,9 @@ class Gate:
             return SAY_PROTECTED
         if proc in READ_DENY_PROCESSES or _ALWAYS_DENY_TITLE.search(title) or _PASSWORD_MANAGER_TITLE.search(title):
             return SAY_READ_PRIVATE
+        perms = (self.settings.get("app_permissions") if self.settings is not None else None) or {}
+        if proc and perms.get(proc) == "off":
+            return f"You've switched {app_label(proc)} off for me, so I won't read it."
         browser = proc in BROWSER_PROCESSES
         if browser:
             addr = f.get("address")

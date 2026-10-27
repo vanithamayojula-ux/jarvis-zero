@@ -388,6 +388,7 @@ class ToolBox:
         self.edge = edge                     # EdgeController for JARVIS's own Edge window (None = no browser control)
         self.tv = None                       # tv.MiniTV: spidey's mini TV (the server sets it; None = not available)
         self.memes = None                    # memes.MemeMaker: spidey's meme reactions (the server sets it)
+        self.catalog = None                  # apps.Catalog: every app on the laptop, for the Apps list (the server sets it)
         from .companion import Pomodoro
         self.pomodoro = Pomodoro()           # study mode: focus rounds and breaks (the server hooks up its announcements)
         self.media_opened_at = 0.0           # when a video/music site was last opened (hands-free gets stricter)
@@ -521,16 +522,47 @@ class ToolBox:
                     found.setdefault(key, lnk)
         return found
 
-    def app_names(self) -> list[str]:
-        return list(self.settings.get("approved_apps")) + list(self.shortcuts())
+    def listed_apps(self) -> dict[str, dict]:
+        """Apps from the laptop's list that you allowed to be opened (Apps list: open or full), by spoken name."""
+        if self.catalog is None:
+            return {}
+        from .apps import RANK, level_of, perm_key
+        out = {}
+        for a in self.catalog.apps():
+            if a["kind"] != "locked" and RANK[level_of(self.settings, perm_key(a))] >= RANK["open"]:
+                out.setdefault(normalize_name(a["name"]), a)
+        return out
 
-    def find_app(self, name: str) -> tuple[str, str | Path] | None:
+    def switched_off(self, key: str, target) -> bool:
+        """You set this app to "off" in the Apps list: it isn't opened, even from approved_apps or a Desktop shortcut."""
+        perms = self.settings.get("app_permissions") or {}
+        if not perms or self.catalog is None:
+            return False
+        if isinstance(target, dict):
+            from .apps import perm_key
+            return perms.get(perm_key(target)) == "off"
+        exe = Path(str(target)).name.lower() if isinstance(target, str) and target.lower().endswith(".exe") else ""
+        entry = self.catalog.by_name(key)
+        return perms.get(exe) == "off" or bool(entry and perms.get(entry["exe"] or f"id:{entry['id']}") == "off")
+
+    def app_names(self) -> list[str]:
+        return list(dict.fromkeys([*self.settings.get("approved_apps"), *self.shortcuts(), *self.listed_apps()]))
+
+    def find_app(self, name: str) -> tuple[str, str | Path | dict] | None:
+        hit = self._find_app(name)
+        return None if hit and self.switched_off(*hit) else hit
+
+    def _find_app(self, name: str) -> tuple[str, str | Path | dict] | None:
         want = normalize_name(name)
         want = APP_ALIASES.get(want, want)
         if not want:
             return None
         apps = {k.lower(): v for k, v in self.settings.get("approved_apps").items()}
         links = self.shortcuts()
+        listed = self.listed_apps()
+        for table in (apps, links, listed):
+            if want in table:
+                return want, table[want]
         for table in (apps, links):
             if want in table:
                 return want, table[want]
@@ -540,11 +572,15 @@ class ToolBox:
                         (len(k) > 3 and len(want.split()) <= 3 and k in want)), None)
             if hit:
                 return hit, table[hit]
+        # the laptop's own list: "open blender" finds "Blender 5.2", "open teams" finds "Microsoft Teams"
+        hit = next((k for k in listed if k.startswith(want + " ") or k.removeprefix("microsoft ") == want), None)
+        if hit:
+            return hit, listed[hit]
         if len(want.split()) <= 2 and len(want) >= 4:  # misheard short names: "crome", "valorent", "blendar"
-            names = list(apps) + list(links)
+            names = list(apps) + list(links) + list(listed)
             close = difflib.get_close_matches(want, names, n=1, cutoff=0.8)
             if close:
-                return close[0], apps.get(close[0]) or links[close[0]]
+                return close[0], apps.get(close[0]) or links.get(close[0]) or listed[close[0]]
         return None
 
     def _open_app(self, args: dict) -> ToolResult:
@@ -557,10 +593,21 @@ class ToolBox:
             except BrowserError as exc:
                 return ToolResult(str(exc))
             return ToolResult("Opening Edge.")
-        hit = self.find_app(name)
+        hit = self._find_app(name)
+        if hit and self.switched_off(*hit):
+            return ToolResult(f"You've switched {hit[0].title()} off for me in the Apps list, so I won't open it.")
         if not hit:
-            return ToolResult(f"'{name}' isn't one of your approved apps or Desktop shortcuts.")
+            return ToolResult(f"'{name}' isn't one of your approved apps or Desktop shortcuts. You can allow apps in the "
+                              f"panel's Apps list.")
         key, target = hit
+        if isinstance(target, dict):              # an app from the laptop's list: started by Windows itself, no shell
+            from .apps import launch_argv
+            argv = launch_argv(target)
+            if not argv:
+                return ToolResult(f"I can't start {target['name']} safely from here.")
+            self.launch(argv)
+            self.app_hint = (key, time.monotonic())
+            return ToolResult(f"Opening {target['name']}.")
         if isinstance(target, Path):
             self.open_path(str(target))          # a Desktop shortcut
         elif target.lower().endswith(".exe") or "\\" in target:
@@ -680,7 +727,7 @@ class ToolBox:
             self.edge_used_at = time.monotonic()
             return "Edge"
         hit = self.find_app(name) if name and name not in ("default", "browser") else None
-        if hit and not isinstance(hit[1], Path):
+        if hit and isinstance(hit[1], str):
             target = hit[1]
             if not target.lower().endswith(".exe") and not _cmd_safe(url):
                 # this path goes through cmd.exe, where & | ^ < > " and %NAME% mean something: a link with those never goes in
@@ -1251,7 +1298,7 @@ class ToolBox:
             if not hwnd:
                 return ToolResult("I'm not sure which window you mean. Name it, like “minimise Notepad”.")
         try:
-            d.check_allowed(hwnd)
+            d.check_allowed(hwnd, "window")
         except DesktopError as exc:
             return ToolResult(str(exc))
         where = self._app_name(hwnd)

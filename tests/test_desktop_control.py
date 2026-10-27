@@ -35,7 +35,7 @@ class FakeDesktop:
     @staticmethod
     def spotify_installed(): return True
 
-    def check_allowed(self, hwnd):
+    def check_allowed(self, hwnd, kind=""):
         proc = self.windows[hwnd][0]
         if proc in BLOCKED_PROCESSES:
             raise DesktopError(f"I won't click or type in {BLOCKED_NAMES.get(proc, 'that window')}.")
