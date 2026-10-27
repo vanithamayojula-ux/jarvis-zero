@@ -34,8 +34,8 @@ SPIDEY = 64                          # about how much room spidey takes, at 100%
 GAP = 10
 UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/141.0 Safari/537.36"
 IDLE_PAGE = "data:text/html;charset=utf-8," + quote(
-    "<title>JARVIS TV</title><body style='margin:0;background:#000;color:#777;font:14px Segoe UI;display:grid;"
-    "place-items:center;height:100vh'>JARVIS TV</body>")
+    "<title>Spidey TV</title><body style='margin:0;background:#000;color:#777;font:14px Segoe UI;display:grid;"
+    "place-items:center;height:100vh'>Spidey TV</body>")
 
 # A YouTube video filling the whole window: everything but the player hidden, the player stretched over the page.
 # Re-applied every 0.7 s, so the next video (YouTube changes pages without reloading) looks the same.

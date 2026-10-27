@@ -36,7 +36,7 @@ def test_held_sentence_continuation_needs_no_wake_word(settings):
 
     async def go():
         ScriptedMic.script = [("silence", 0.3), ("say", tone(0.5)), ("silence", 0.5), ("say", tone(0.5)), ("silence", 2)]
-        eng = _engine(settings, FakeSTT(["Jarvis, so I was thinking and", "maybe a movie tonight"]))
+        eng = _engine(settings, FakeSTT(["Spidey, so I was thinking and", "maybe a movie tonight"]))
         await eng.start()
         q = eng.subscribe()
         eng.start_listening()
@@ -54,7 +54,7 @@ def test_held_sentence_is_answered_when_the_tail_is_noise(settings):
 
     async def go():
         ScriptedMic.script = [("silence", 0.3), ("say", tone(0.5)), ("silence", 0.5), ("say", tone(0.4)), ("silence", 2)]
-        eng = _engine(settings, FakeSTT(["Jarvis, tell me about the weather and", ""]))  # a cough → empty transcript
+        eng = _engine(settings, FakeSTT(["Spidey, tell me about the weather and", ""]))  # a cough → empty transcript
         await eng.start()
         q = eng.subscribe()
         eng.start_listening()

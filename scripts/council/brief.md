@@ -93,7 +93,18 @@ when they ask.
   While on, one control connection registers a single page script (a stylesheet that makes a YouTube player fill the
   window). Off = that Edge process is closed (it is also closed when JARVIS stops). Desktop control treats it as JARVIS's
   own window. Settings mini_tv, tv_size. Costs ~300 MB RAM only while on.
-- 1391 automated tests pass (3 skipped, including the real-OCR test with JARVIS_OCR_LIVE=1 and the real-Edge page-script
+- Since 27 Oct the assistant is called Spidey (persona, replies, panel, dashboard, README; wake word "spidey", matched
+  in the transcript with mishearing aliases and a not-the-wake-word list such as "spider" and "spicy"; code, folders and
+  the `jarvis` package keep the old name). More natural talk: everyday reactions (haha, oof, no way…) in the
+  rules plus more made-up example exchanges in the system prompt. This is prompting, not training.
+- Since 27 Oct, meme reactions after every reply (not in typing mode, not on phone calls): spidey acts out a mood guessed
+  from the words at once (nothing sent), then a second Groq model (openai/gpt-oss-20b, separate free limits; its failures
+  never pause the chat model) gets the two lines, redacted, and never anything read from a page or window. It picks one of 35
+  Imgflip templates and writes captions, which are checked (known template, length cap, no links or hashtags) and drawn
+  locally with Pillow. Templates come from Imgflip's public list, are downloaded only from i.imgflip.com, verified as
+  pictures and cached in data/memes. Without the cloud, a plain reaction picture for the mood is shown. The meme panel is a
+  no-focus window beside spidey that hides after 14 s. Settings memes, meme_model; "stop the memes" / "memes on".
+- 1426 automated tests pass (3 skipped, including the real-OCR test with JARVIS_OCR_LIVE=1 and the real-Edge page-script
   test with JARVIS_JS_LIVE=1).
 
 ## Known gaps and pain points (from real use)

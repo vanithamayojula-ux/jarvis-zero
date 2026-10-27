@@ -96,6 +96,9 @@ def build(settings: Settings, mic_factory=None, speaker_factory=None, llm=None, 
         from .tv import MiniTV
         tools.tv = MiniTV(DATA_DIR / "edge-tv", guard=edge.guard if edge else _site_guard(settings),
                           spidey_file=DATA_DIR / "overlay.json", size=settings.get("tv_size") or "medium")
+    if mic_factory is None:
+        from .memes import MemeMaker                        # spidey's meme reactions (templates kept in data/memes)
+        tools.memes = MemeMaker(DATA_DIR / "memes")
     if desktop is not None:
         # the "this is where I will click" ring: the rectangle was already checked (highlight.validate_highlight)
         desktop.on_target = lambda rect, label: S.engine.emit(
@@ -297,6 +300,7 @@ async def overlay():
             "looking": _looking(), "screen_reading": S.settings.get("screen_reading") is not False,
             "typing": (getattr(S.engine.conversation, "typing", None) or {}).get("where") or "",
             "tv": {"on": tv_on, "title": tv.showing.get("title", "") if tv_on else ""},
+            "memes": S.settings.get("memes") is not False,
             "cloud_reason": cloud.get("reason") or "", "media": {"playing": playing,
                                                                   "title": getattr(edge, "playing_title", "") if playing else ""}}
 
@@ -385,7 +389,7 @@ def _propose_protected(changes: dict) -> str:
         S.audit.record(Action(kind="setting", label=names), Decision("allow"), "applied")
         S.engine.emit({"type": "settings", "settings": S.settings.all()})
         return ToolResult(f"Done, I changed {names}.")
-    prompt = f"A change to {names} is waiting. Say yes in JARVIS to allow it."
+    prompt = f"A change to {names} is waiting. Say yes to Spidey to allow it."
     S.engine.conversation.pending = ToolResult("Settings change waiting for a yes.", True, prompt, apply, risk="high")
     S.audit.record(Action(kind="setting", label=names), Decision("confirm"), "proposed")
     S.engine.emit({"type": "transcript", "role": "assistant", "text": prompt})
@@ -533,7 +537,7 @@ async def patch_settings(body: SettingsIn):
     S.engine.emit({"type": "settings", "settings": new})
     if pending:
         from fastapi.responses import JSONResponse
-        return JSONResponse({**new, "pending": pending, "say": "Say yes in JARVIS to allow it."},
+        return JSONResponse({**new, "pending": pending, "say": "Say yes to Spidey to allow it."},
                             status_code=200 if direct else 202)
     return new
 

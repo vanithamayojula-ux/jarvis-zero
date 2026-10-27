@@ -387,6 +387,7 @@ class ToolBox:
         self.open_path = opener or os.startfile
         self.edge = edge                     # EdgeController for JARVIS's own Edge window (None = no browser control)
         self.tv = None                       # tv.MiniTV: spidey's mini TV (the server sets it; None = not available)
+        self.memes = None                    # memes.MemeMaker: spidey's meme reactions (the server sets it)
         self.media_opened_at = 0.0           # when a video/music site was last opened (hands-free gets stricter)
         self.desktop = desktop               # Desktop: click/type/keys in any app (None = only inside JARVIS's Edge)
         self.system = system                 # SystemControls: volume and screen brightness (None = not available)
@@ -448,9 +449,9 @@ class ToolBox:
             Tool("web_search", "Search Google, YouTube, Amazon… in the browser.",
                  _obj({"query": {"type": "string"}, "site": {"type": "string"}, "browser": {"type": "string"}}, ["query"]),
                  self._web_search),
-            Tool("browser_type", "Type text into the current page in JARVIS's Edge (submit=true presses Enter).",
+            Tool("browser_type", "Type text into the current page in your own Edge window (submit=true presses Enter).",
                  _obj({"text": {"type": "string"}, "submit": {"type": "boolean"}}, ["text"]), self._b_type),
-            Tool("browser_key", "Press a key in JARVIS's Edge.", _obj({"key": {"type": "string"}}, ["key"]), self._b_key),
+            Tool("browser_key", "Press a key in your own Edge window.", _obj({"key": {"type": "string"}}, ["key"]), self._b_key),
             Tool("browser_click", "Click something visible on the page by its text, e.g. 'first video'.",
                  _obj({"target": {"type": "string"}, "nth": {"type": "integer"}}, ["target"]), self._b_click),
             Tool("browser_scroll", "Scroll the page.", _obj({"direction": {"type": "string"}}, ["direction"]), self._b_scroll),
@@ -487,12 +488,12 @@ class ToolBox:
                  self._screen_pick),
             Tool("window_control", "Switch to, minimise, maximise, restore, snap or close a window; show the desktop.",
                  _obj({"verb": {"type": "string"}, "app": {"type": "string"}}, ["verb"]), self._window_control),
-            Tool("browser_tabs", "List, switch or close tabs in JARVIS's Edge.",
+            Tool("browser_tabs", "List, switch or close tabs in your own Edge window.",
                  _obj({"action": {"type": "string"}, "which": {"type": "string"}}, ["action"]), self._b_tabs),
-            Tool("browser_find", "Find a word on the page in JARVIS's Edge and show it.",
+            Tool("browser_find", "Find a word on the page in your own Edge window and show it.",
                  _obj({"term": {"type": "string"}, "step": {"type": "integer"}, "count_only": {"type": "boolean"}}),
                  self._b_find),
-            Tool("browser_page_info", "The title or address of the page in JARVIS's Edge.",
+            Tool("browser_page_info", "The title or address of the page in your own Edge window.",
                  _obj({"what": {"type": "string"}}, ["what"]), self._b_page_info),
             Tool("open_settings", "Open one of a fixed list of Windows settings pages (Wi-Fi, display, sound…).",
                  _obj({"page": {"type": "string"}, "flip": {"type": "boolean"}}, ["page"]), self._open_settings),
@@ -748,7 +749,7 @@ class ToolBox:
         if not self.edge:
             return ToolResult("Browser control isn't available.")
         if not self.edge.running():
-            return ToolResult("JARVIS's Edge window isn't open yet. Say “open YouTube” or “open Edge” first.")
+            return ToolResult("My Edge window isn't open yet. Say “open YouTube” or “open Edge” first.")
         self.edge_used_at = time.monotonic()        # the next "click"/"type" stays in Edge until you switch apps
         return None
 

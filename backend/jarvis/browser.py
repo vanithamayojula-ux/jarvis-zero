@@ -27,7 +27,7 @@ BLOCKED_PAGE = """<!doctype html><meta name=viewport content="width=device-width
 <div style="max-width:520px;text-align:center"><div style="font-size:54px">&#128737;</div>
 <h2 style="color:#ff5c5c">JARVIS blocked this page</h2><p><b>{host}</b></p><p>Reason: {reason}.</p>
 <p style="color:#999">JARVIS stopped it within a second of it opening, and nothing was typed or sent to it.
-If you're sure it's safe, add it to <code>site_allowlist</code> in JARVIS's settings.</p></div>"""
+If you're sure it's safe, add it to <code>site_allowlist</code> in Spidey's settings.</p></div>"""
 
 EDGE_PATHS = [
     r"C:\Program Files (x86)\Microsoft\Edge\Application\msedge.exe",
@@ -442,7 +442,7 @@ class EdgeController:
 
     def _http(self, path: str, method: str = "GET", timeout: float = 2.0):
         if not self.port:
-            raise BrowserError("JARVIS's Edge isn't running.")
+            raise BrowserError("My Edge window isn't running.")
         req = urllib.request.Request(f"http://127.0.0.1:{self.port}{path}", method=method)
         with urllib.request.urlopen(req, timeout=timeout) as r:
             body = r.read()

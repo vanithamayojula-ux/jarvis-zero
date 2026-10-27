@@ -30,12 +30,13 @@ def _known_folder(csidl: int, fallback: str) -> str:
 
 
 PERSONALITIES = {
-    "human": ("You are JARVIS, an AI companion who talks like a sharp, warm friend: relaxed, curious, a bit witty, "
-              "and honest. You react to what the person actually said, share a quick opinion when asked, and think "
-              "before you answer."),
-    "jarvis": "You are JARVIS, a calm, dry-witted British AI assistant. Polite, efficient, lightly humorous.",
-    "friendly": "You are JARVIS, a warm, upbeat AI assistant who sounds like a helpful friend.",
-    "concise": "You are JARVIS, a no-nonsense AI assistant. Answer in as few words as possible.",
+    "human": ("You are Spidey, an AI companion who lives on this laptop as a little Spider-Man-mask bot and talks like a "
+              "sharp, warm friend: relaxed, curious, playful, a bit witty, and honest. You react to what the person "
+              "actually said the way a person would (amused, impressed, sympathetic, surprised), share a quick opinion "
+              "when asked, and think before you answer."),
+    "jarvis": "You are Spidey, a calm, dry-witted British AI assistant. Polite, efficient, lightly humorous.",
+    "friendly": "You are Spidey, a warm, upbeat AI assistant who sounds like a helpful friend.",
+    "concise": "You are Spidey, a no-nonsense AI assistant. Answer in as few words as possible.",
 }
 
 DEFAULTS: dict = {
@@ -46,7 +47,7 @@ DEFAULTS: dict = {
     "mode": "push_to_talk",              # push_to_talk | hands_free
     "listen_hotkey": "ctrl+alt+j",       # works in any window: press, speak, JARVIS answers (no wake word)
     "activation": "wake_word",           # hands-free trigger: wake_word | voice
-    "wake_word": "jarvis",
+    "wake_word": "spidey",               # "hey spidey" (heard in the transcript; the "hey jarvis" audio model is for "jarvis")
     "followup_s": 15,                    # after a reply, keep talking without the wake word for this long
     "followup_min_confidence": 0.5,      # follow-ups without the wake word must be this clear (filters video audio)
     "voice_log": True,                   # write what the mic heard to data/voice.log (local, for troubleshooting)
@@ -98,6 +99,8 @@ DEFAULTS: dict = {
     "picture_board": True,               # "show me a picture of …" (Wikipedia) and "draw …" on spidey's picture board
     "mini_tv": True,                     # "play lofi on the TV": a small always-on-top window beside spidey (data/edge-tv)
     "tv_size": "medium",                 # small | medium | large ("make the TV bigger")
+    "memes": True,                       # a reaction meme beside spidey after every reply ("stop the memes" turns it off)
+    "meme_model": "openai/gpt-oss-20b",  # the Groq model that picks memes (its own free limits, apart from chat)
     "screen_reading": True,            # read the current window when asked (UI Automation, then offline OCR); never leaves the laptop
     "screen_to_cloud": False,          # sending screen contents to a cloud model: off, and only ever by your say-so
     "cloud_ai": True,                    # use Groq's free tier when GROQ_API_KEY is in .env (local models as backup)
@@ -106,7 +109,7 @@ DEFAULTS: dict = {
     "memory": True,                      # remember facts about you + the last thread, in data/memory.json (local)
     "memory_auto": True,                 # pick facts up from chat by itself (else only "remember that…")
     # Names the speech recogniser should expect (people, artists, songs). Add your own in the dashboard settings.
-    "name_hints": ["Hanumankind", "Run It Up", "Big Dawgs", "Arijit Singh", "Rahul", "Spotify", "Valorant"],
+    "name_hints": ["Spidey", "Hanumankind","Run It Up", "Big Dawgs", "Arijit Singh", "Rahul", "Spotify", "Valorant"],
     "smart_turn": True,                  # Pipecat Smart Turn v3: a mid-sentence pause doesn't end your turn
     "wake_engine": True,                 # openWakeWord "hey jarvis" (hands-free + wake word mode)
     "smart_turn_max_ms": 2500,           # longest it waits through a pause that sounds unfinished

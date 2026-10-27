@@ -42,7 +42,7 @@ class CostSafetyGate:
             # Real phone numbers are never dialled at ₹0: there is no verified free carrier route.
             if not settings_tel.get("real_calls_enabled"):
                 return GateDecision(False, "Real phone calls are disabled. No verified zero-cost route to "
-                                           "ordinary phone numbers exists, so JARVIS will not dial them.")
+                                           "ordinary phone numbers exists, so Spidey will not dial them.")
             if not (provider.reaches_pstn and provider.zero_cost_verified):
                 return GateDecision(False, f"Provider '{provider.name}' is not verified as zero-cost for phone numbers.")
             return GateDecision(False, "Blocked: PSTN calling requires a manually verified provider; none is configured.")

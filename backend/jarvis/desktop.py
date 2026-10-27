@@ -124,6 +124,8 @@ def is_jarvis_window(hwnd: int, proc: str, title: str) -> bool:
     """JARVIS's own dashboard tab, spidey and the server: never a target, and never 'the app you were using'."""
     if title.startswith("JARVIS Zero") or title == "JARVIS bot":
         return True
+    if title == "Spidey" or title.startswith(("Spidey - ", "Spidey and ")):    # the dashboard tab, renamed 27 Oct
+        return True
     if proc == "msedge.exe" and is_jarvis_edge(hwnd, "edge-tv"):     # spidey's mini TV
         return True
     if proc in ("python.exe", "pythonw.exe"):

@@ -394,6 +394,11 @@ VERBS = {"drink", "eat", "take", "call", "go", "check", "stretch", "study", "sle
 # Things you might say that earn heart eyes.
 LOVE_WORDS = re.compile(r"\b(?:thanks?|thank you|thx|love you|love it|cute|awesome|good (?:job|boy|bot)|"
                                       r"you'?re the best|great job|well done|nice one)\b", re.I)
+# How spidey shows each mood Spidey reacts with (backend/jarvis/memes.py MOODS) — its body language for the meme
+MOOD_ANIM = {"happy": "happy", "laughing": "wiggle", "excited": "celebrate", "proud": "celebrate", "love": "love",
+             "sad": "peek", "tired": "yawn", "annoyed": "shake", "confused": "tilt", "surprised": "surprised",
+             "thinking": "tilt", "smug": "wink", "scared": "dizzy", "awkward": "peek", "bored": "yawn", "agree": "nod",
+             "disagree": "shake", "waiting": "yawn", "chaos": "spin", "wholesome": "love"}
 
 
 def _mixf(a, b, f):
@@ -420,6 +425,7 @@ class Link(threading.Thread):
         self.screen_reading = True                    # may JARVIS read a window when asked (the menu / panel switch)
         self.typing_where = ""                        # typing mode is on, typing into this app ("" = off)
         self.tv_on = False                            # the mini TV window is showing (the right-click toggle)
+        self.memes_on = True                          # a meme pops up beside spidey after each reply
 
     def note_looking(self, app: str, seconds: float = 3.0) -> None:
         self.looking_app, self.looking_until = str(app or "a window")[:30], time.monotonic() + max(0.0, min(seconds, 3.0))
@@ -465,6 +471,10 @@ class Link(threading.Thread):
                         elif kind == "tv":
                             self.tv_on = bool(ev.get("on"))
                             self.events.put(ev)
+                        elif kind == "memes":
+                            self.memes_on = bool(ev.get("on"))
+                        elif kind in ("mood", "meme"):
+                            self.events.put(ev)
             except Exception:
                 pass
             self.ws_ok = False
@@ -500,6 +510,7 @@ class Link(threading.Thread):
                     self.typing_where = str(info.get("typing", self.typing_where) or "")[:30]
                     tv = info.get("tv")
                     self.tv_on = bool(tv.get("on")) if isinstance(tv, dict) else False
+                    self.memes_on = bool(info.get("memes", self.memes_on))
                     look = info.get("looking")
                     if isinstance(look, dict) and look.get("app"):
                         self.note_looking(look["app"], float(look.get("expires_in") or 0.0))
@@ -549,6 +560,8 @@ class Bot:
         self.rctrl = tk.BooleanVar(root, value=True)            # tap Right Ctrl on its own: open/close the chat bar
         self.panel = None                                       # JARVIS's small panel (jarvis_panel.Panel)
         self.board = None                                       # the picture board (jarvis_board.Board), made on first use
+        self.memes = None                                       # the meme panel (jarvis_memes.MemePanel), made on first meme
+        self.quick_mood = ""                                    # the mood spidey just reacted with (the meme follows)
         self.target_ring = TargetRing(root)                     # the "where I will click" outline (made on first use)
         self.x, self.y = self._load_pos()
         self.home = (self.x, self.y)                            # where you put it; wandering always comes back here
@@ -583,11 +596,15 @@ class Bot:
         combo = "Right Ctrl" if self.rctrl_tap and self.rctrl_tap.active else \
             self.chat_hotkey.active.title().replace("+", " + ") if self.chat_hotkey and self.chat_hotkey.active else ""
         self.menu.add_command(label="Chat with me" + (f"   ({combo})" if combo else ""), command=self.open_bar)
-        self.menu.add_command(label="Open JARVIS panel", command=self.open_panel)
+        self.menu.add_command(label="Open Spidey panel", command=self.open_panel)
         self.menu.add_command(label="Picture board", command=lambda: self.get_board().open_empty())
         self.tv_var = tk.BooleanVar(root, value=False)
         self.menu.add_checkbutton(label="Mini TV", variable=self.tv_var,
                                   command=lambda: self.status.send("turn on the tv" if self.tv_var.get() else "turn off the tv"))
+        self.memes_var = tk.BooleanVar(root, value=True)
+        self.menu.add_checkbutton(label="Meme reactions", variable=self.memes_var,
+                                  command=lambda: (self.status.send("memes on" if self.memes_var.get() else "stop the memes"),
+                                                   None if self.memes_var.get() or self.memes is None else self.memes.hide()))
         tricks = tk.Menu(self.menu, tearoff=0)
         tricks.add_command(label="Shoot a web at the mouse", command=lambda: self.shoot_web())
         tricks.add_command(label="Hang upside down", command=lambda: self.hang())
@@ -596,9 +613,9 @@ class Bot:
         self.menu.add_cascade(label="Tricks", menu=tricks)
         self.mode_var = tk.StringVar(root, value=self.status.io_mode)
         modes = tk.Menu(self.menu, tearoff=0)
-        modes.add_radiobutton(label="Chat: I type, JARVIS answers in text (lightest)", value="chat",
+        modes.add_radiobutton(label="Chat: I type, Spidey answers in text (lightest)", value="chat",
                               variable=self.mode_var, command=lambda: self.set_mode("chat"))
-        modes.add_radiobutton(label="Voice: I talk, JARVIS talks back", value="voice",
+        modes.add_radiobutton(label="Voice: I talk, Spidey talks back", value="voice",
                               variable=self.mode_var, command=lambda: self.set_mode("voice"))
         self.menu.add_cascade(label="Mode", menu=modes)
         self.screen_var = tk.BooleanVar(root, value=self.status.screen_reading)
@@ -606,7 +623,8 @@ class Bot:
                                   command=self.toggle_screen_reading)
         self.menu.configure(postcommand=lambda: (self.mode_var.set(self.status.io_mode),
                                                  self.screen_var.set(self.status.screen_reading),
-                                                 self.tv_var.set(self.status.tv_on)))
+                                                 self.tv_var.set(self.status.tv_on),
+                                                 self.memes_var.set(self.status.memes_on)))
         looks = tk.Menu(self.menu, tearoff=0)
         for key, cos in COSTUMES.items():
             looks.add_radiobutton(label=cos["label"], value=key, variable=self.costume,
@@ -811,6 +829,30 @@ class Bot:
             self.board = Board(self.root, self.status, URL, self.s, self._board_spot)
         return self.board
 
+    def get_memes(self):
+        """The meme panel (spidey's reaction to each moment, as a meme). Made once, then shown and hidden."""
+        if self.memes is None:
+            from jarvis_memes import MemePanel
+            self.memes = MemePanel(self.root, self.status, URL, self.s, self._meme_spot)
+        return self.memes
+
+    def _meme_spot(self, w: int, h: int) -> tuple[int, int]:
+        """Beside whatever is open next to spidey (the picture board, else the panel, else spidey itself), on the side
+        with room, bottoms level, so nothing covers anything."""
+        s = self.s
+        if self.board is not None and self.board.shown:
+            b = self.board.win
+            ax, ay, aw, ah = b.winfo_x(), b.winfo_y(), b.winfo_width(), b.winfo_height()
+        elif self.panel is not None and self.panel.alive:
+            p = self.panel.win
+            ax, ay, aw, ah = p.winfo_x(), p.winfo_y(), p.winfo_width(), p.winfo_height()
+        else:
+            return self._panel_spot(w, h)
+        wa = work_area(ax + aw / 2, ay + ah / 2) or (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        x = ax - w - int(6 * s) if ax - w - int(6 * s) >= wa[0] else ax + aw + int(6 * s)
+        y = ay + ah - h
+        return int(min(max(x, wa[0]), wa[2] - w)), int(min(max(y, wa[1]), wa[3] - h))
+
     def _board_spot(self, w: int, h: int) -> tuple[int, int]:
         """Beside spidey like the panel; when the panel is open, beside the panel instead, so neither covers the other."""
         panel = self.panel if self.panel is not None and self.panel.alive else None
@@ -858,7 +900,7 @@ class Bot:
         """Right-click → Mode. JARVIS answers with an io_mode event, which updates the menu and shows a bubble."""
         if not self.status.online:
             self.mode_var.set(self.status.io_mode)
-            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            self.show_bubble("My brain isn't answering right now. Is the Spidey server running?", hide_after=6)
             return
         self.status.post("/api/settings", {"changes": {"io_mode": mode}}, method="PATCH")
 
@@ -868,7 +910,7 @@ class Bot:
         want = self.screen_var.get()
         if not self.status.online:
             self.screen_var.set(self.status.screen_reading)
-            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            self.show_bubble("My brain isn't answering right now. Is the Spidey server running?", hide_after=6)
             return
         self.status.send("you can look at the screen again" if want else "stop looking at the screen")
 
@@ -1014,7 +1056,7 @@ class Bot:
             return
         self.entry.delete(0, "end")
         if not self.status.online:
-            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            self.show_bubble("My brain isn't answering right now. Is the Spidey server running?", hide_after=6)
             self.react("shake")
             return
         self.react("nod")                                       # got it
@@ -1025,7 +1067,7 @@ class Bot:
     def _ask(self, text: str, confirm: bool = False):
         """Send something to JARVIS for you (typed, a bubble button, a dropped link) and show its reply."""
         if not self.status.online:
-            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            self.show_bubble("My brain isn't answering right now. Is the Spidey server running?", hide_after=6)
             self.react("shake")
             return
         self.chat_active, self.chat_reply, self.chat_sent_at = True, [], time.monotonic()
@@ -1060,6 +1102,19 @@ class Bot:
                     self.poke()
                     self.react("nod")
                 continue
+            if ev.get("type") == "mood":                        # Spidey's feeling about this moment: act it out
+                self.quick_mood = str(ev.get("mood") or "")
+                if self.quick_mood in MOOD_ANIM and not self.alert_text:
+                    self.poke()
+                    self.react(MOOD_ANIM[self.quick_mood], awake=True)
+                continue
+            if ev.get("type") == "meme":                        # …and the meme for it, beside spidey
+                if self.status.memes_on:
+                    self.get_memes().on_event(ev)
+                    mood = str(ev.get("mood") or "")
+                    if mood in MOOD_ANIM and not self.alert_text:   # react again: its own take, or a wink if the same
+                        self.react(MOOD_ANIM[mood] if mood != self.quick_mood else "wink", awake=True)
+                continue
             panel = self.panel if self.panel is not None and self.panel.alive else None
             if panel:
                 panel.on_event(ev)                              # the panel shows the whole conversation
@@ -1078,7 +1133,7 @@ class Bot:
                 self.show_bubble("Okay, I'm back.", hide_after=3)
             elif ev.get("type") == "send_error":
                 self.chat_active = False
-                self.show_bubble("Hmm, that didn't reach JARVIS. Try again in a moment?", hide_after=6)
+                self.show_bubble("Hmm, that didn't reach my brain. Try again in a moment?", hide_after=6)
                 self.react("shake")
             elif ev.get("type") == "open_chat":                 # talk shortcut in chat mode: type instead
                 if panel:
@@ -1105,7 +1160,7 @@ class Bot:
                 self.mode_var.set(ev.get("mode", "voice"))
                 if panel:
                     panel.on_event({"type": "note", "text": "Chat mode: answers in text, no voice" if ev.get("mode") == "chat"
-                                    else "Voice mode: JARVIS talks again"})
+                                    else "Voice mode: Spidey talks again"})
                 elif not self.chat_active:
                     self.poke()
                     self.react("nod")
@@ -1126,8 +1181,11 @@ class Bot:
                 self.turn_reply = []
                 if not self.chat_active:
                     self.chat_reply = []      # a new spoken turn starts a fresh bubble
-                    if LOVE_WORDS.search(str(ev.get("text", ""))):
-                        self.react("love")    # said "thank you" out loud → heart eyes
+                if LOVE_WORDS.search(str(ev.get("text", ""))):
+                    self.react("love")        # "thank you" → heart eyes
+                elif not self.alert_text:
+                    self.poke()
+                    self.react("nod")         # it heard you (the mood and the meme follow the reply)
             elif ev.get("type") == "confirm" and not self.alert_text:
                 # JARVIS asked "shall I…?": answer with a button (typing or saying it still works too)
                 if ev.get("prompt"):
@@ -1392,7 +1450,7 @@ class Bot:
             self.pill.geometry(f"{pw}x{ph}+{px}+{py}")
 
     # ---- quick actions: hover over spidey for a moment and four buttons pop out above its head ----
-    RING = [("talk", "Talk to JARVIS"), ("timer", "Set a timer"), ("hush", "Stop talking"), ("home", "Open JARVIS panel")]
+    RING = [("talk", "Talk to Spidey"), ("timer", "Set a timer"), ("hush", "Stop talking"), ("home", "Open Spidey panel")]
     RING_ANGLES = (-165, -115, -65, -15)                        # degrees round the head, left to right
 
     def _rest_cy(self) -> float:
@@ -1497,7 +1555,7 @@ class Bot:
             self.open_bar(prefill="Set a timer for ")
             return
         if not self.status.online:
-            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            self.show_bubble("My brain isn't answering right now. Is the Spidey server running?", hide_after=6)
             self.react("shake")
         elif kind == "talk" and self.status.io_mode == "chat":
             self.open_bar()                                     # chat mode: the mic stays off, so type instead
@@ -1881,7 +1939,7 @@ class Bot:
     def _dropped_text(self, text: str):
         self.react("nod")
         self.open_bar(prefill=re.sub(r"\s+", " ", text)[:500])
-        self.show_bubble("Want to ask JARVIS about this? Change it if you like, then press Enter.", hide_after=6)
+        self.show_bubble("Want to ask me about this? Change it if you like, then press Enter.", hide_after=6)
 
     def _dropped_files(self, paths: list[Path]):
         try:
@@ -1934,7 +1992,7 @@ class Bot:
 
     def _summarize_file(self, p: Path):
         if not self.status.online:
-            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            self.show_bubble("My brain isn't answering right now. Is the Spidey server running?", hide_after=6)
             self.react("shake")
             return
         try:

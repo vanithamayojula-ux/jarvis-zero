@@ -62,10 +62,10 @@ def save_key(var: str, key: str) -> None:
 
 
 def main() -> None:
-    print("\n  JARVIS Zero setup\n  -----------------\n")
-    print("  1) Chat  - you type, JARVIS answers in text. Silent and the lightest on the laptop")
+    print("\n  Spidey setup\n  ------------\n")
+    print("  1) Chat  - you type, Spidey answers in text. Silent and the lightest on the laptop")
     print("             (no microphone, no speaker, no voice models in memory).")
-    print("  2) Voice - you talk (Ctrl+Alt+J) and JARVIS talks back.\n")
+    print("  2) Voice - you talk (Ctrl+Alt+J) and Spidey talks back.\n")
     current = Settings().get("io_mode")
     mode = ask("  Which mode?  1 = Chat, 2 = Voice", {"1": "chat", "chat": "chat", "2": "voice", "voice": "voice"},
                "1" if current == "chat" else "2")
@@ -74,7 +74,7 @@ def main() -> None:
           f"\"chat mode\" / \"voice mode\".\n")
 
     have = [p for p, var in PROVIDERS.items() if os.environ.get(var, "").strip()]
-    print("  Internet lookups: JARVIS can fetch facts it can't know (news, prices, scores, weather).")
+    print("  Internet lookups: Spidey can fetch facts it can't know (news, prices, scores, weather).")
     print("  Only your search words are sent to the search service. Free keys, no card needed:")
     print(f"    Tavily (recommended, 1000 searches/month): {SIGNUP['tavily']}")
     print(f"    Brave Search: {SIGNUP['brave']}      Serper (Google results): {SIGNUP['serper']}")
@@ -101,7 +101,7 @@ def main() -> None:
             restart = True
     print()
     if restart and running():
-        if ask("  JARVIS is running. Restart it now so it picks up the key? y/n", {"y": True, "n": False}, "y"):
+        if ask("  Spidey is running. Restart it now so it picks up the key? y/n", {"y": True, "n": False}, "y"):
             ps = ["powershell", "-NoProfile", "-ExecutionPolicy", "Bypass", "-File"]
             subprocess.run(ps + [str(ROOT / "stop-jarvis.ps1")], check=False)
             subprocess.run(ps + [str(ROOT / "launch.ps1")], check=False)

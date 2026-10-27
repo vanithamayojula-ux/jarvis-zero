@@ -777,6 +777,22 @@ def route_io_mode(t: str) -> list[tuple[str, dict]] | None:
     return [("set_io_mode", {"mode": "chat" if chat else "voice"})]
 
 
+# "stop the memes" / "no more memes" / "memes on" / "show memes again"
+_MEMES = r"(?:the\s+|your\s+)?(?:memes?|meme reactions?|meme panel)"
+_MEMES_OFF = re.compile(rf"^(?:(?:turn|switch)\s+off\s+{_MEMES}|(?:turn|switch)\s+{_MEMES}\s+off|(?:stop|disable|hide|pause|"
+                        rf"mute)\s+{_MEMES}|no\s+more\s+memes|{_MEMES}\s+off|enough\s+(?:with\s+the\s+)?memes)$")
+_MEMES_ON = re.compile(rf"^(?:(?:turn|switch)\s+on\s+{_MEMES}|(?:turn|switch)\s+{_MEMES}\s+(?:back\s+)?on|(?:start|enable|"
+                       rf"bring back)\s+{_MEMES}|show\s+(?:me\s+)?memes(?:\s+again)?|{_MEMES}\s+on|memes\s+again)$")
+
+
+def route_memes(t: str) -> list[tuple[str, dict]] | None:
+    if _MEMES_OFF.match(t):
+        return [("set_memes", {"on": False})]
+    if _MEMES_ON.match(t):
+        return [("set_memes", {"on": True})]
+    return None
+
+
 # Spidey's picture board: "show me a picture of a red panda", "what does a narwhal look like", "draw a cat",
 # "show my photo called goa trip", "close the picture"
 _PIC = r"(?:pictures?|pics?|photos?|photographs?|images?)"
@@ -891,7 +907,8 @@ def route_all(text: str, settings: Settings, find_app=None, spoken: bool = False
         return [("show_actions", {})]            # straight from the action log, no model involved
     if _RESUME_Q.match(text.strip()):
         return [("resume_actions", {})]          # only ever from what the person said (the interpreter can't use it)
-    io = route_io_mode(clean_command(text))
+    io = route_io_mode(clean_command(text)) or route_memes(clean_command(text)) or \
+        route_memes(re.sub(r"[.!?]+$", "", text.strip().lower()))      # (clean_command eats a final "on")
     if io:
         return io
     if HEAR_ME.match(text.strip()):
@@ -956,7 +973,7 @@ def route_all(text: str, settings: Settings, find_app=None, spoken: bool = False
 _LINK_CMD = re.compile(r"^\s*(?:(?:please\s+)?(open|go to|visit)\s+(https?://[^\s\"'<>]+)"
                        r"(\s+and\s+(?:then\s+)?(?:summari[sz]e|sum up)(?:\s+it|\s+the page)?)?"
                        r"|(?:summari[sz]e|sum up)\s+(?:this\s+(?:page|link)\s*:?\s*)?(https?://[^\s\"'<>]+))\s*[.!]?\s*$", re.I)
-_FAILED = re.compile(r"^(?:I can't|I couldn't|JARVIS's Edge window isn't|Browser control isn't|Sorry, that didn't work|"
+_FAILED = re.compile(r"^(?:I can't|I couldn't|(?:JARVIS's|My) Edge window isn't|Browser control isn't|Sorry, that didn't work|"
                      r"WhatsApp isn't linked|'.+' isn't one of|.+ isn't on your approved list|There's no video)", re.I)
 _CHAT_PART = re.compile(r"^(?:tell me|what|what's|whats|how|why|who|when|where|explain|give me|can you tell|do you know|"
                         r"is it|are you|calculate)\b")
@@ -1481,6 +1498,14 @@ STYLE_EXAMPLES = [
     ("can you check my instagram messages",
      "I can't read your messages, sorry. I can open Instagram in my Edge window though, and you can take it from there."),
     ("i'm so tired today", "Ugh, those days are rough. Did you sleep badly, or has it just been a long one?"),
+    ("i got the internship!!", "No way, that's huge! Congrats, seriously. When do you start?"),
+    ("my code only works when i add a print statement",
+     "Haha, the classic. That usually means something's timing-sensitive. Is anything running in parallel?"),
+    ("my friend ghosted me after borrowing money", "Oof, that stings. Have you just asked him straight up about it?"),
+    ("i think pineapple on pizza is good", "Bold. I respect it, honestly. Sweet and salty works."),
+    ("i failed my test", "Ah man, I'm sorry. That feels awful. Was it one tough section, or the whole thing?"),
+    ("lol i fell asleep in class again", "Haha, again? Okay, what time did you actually sleep last night?"),
+    ("is it worth learning rust", "Hmm, depends on what you build. For systems stuff, yeah, totally. For a first job, Python or JavaScript pays off faster."),
 ]
 
 
@@ -1497,10 +1522,10 @@ def _self_description(settings: Settings) -> str:
     from .cloud import groq_key
     local = _model_name(settings.get("llm_model"))
     if settings.get("cloud_ai") and groq_key():
-        return (f"you're JARVIS Zero. Your thinking and voice use Groq's free cloud models, with {local} on this laptop as "
-                f"the backup when the internet or the free limit runs out. Everything you do on the computer happens "
-                f"on this laptop.")
-    return f"you're JARVIS Zero, running {local} locally on this laptop, so nothing goes online."
+        return (f"you're Spidey, a home-made assistant on this laptop. Your thinking and voice use Groq's free cloud models, "
+                f"with {local} on this laptop as the backup when the internet or the free limit runs out. Everything you "
+                f"do on the computer happens on this laptop.")
+    return f"you're Spidey, a home-made assistant running {local} locally on this laptop, so nothing goes online."
 
 
 def system_prompt(settings: Settings, channel: str) -> str:
@@ -1511,6 +1536,9 @@ You are talking with {user} by voice{' over a phone call' if channel == 'phone' 
 How to talk:
 - Sound like a real person in a conversation, not an assistant reading a script. Use contractions and everyday words.
 - React to what they actually said first when it fits, in your own words (don't reuse the same opener), then answer.
+- Use the little reactions real people use, when they fit: haha, oof, ugh, hmm, oh nice, no way, wait, really?,
+  fair enough, honestly, ah man, okay okay. Vary them and don't force one into every reply. Match their energy:
+  hyped when they're excited, gentle when they're down, playful when they're joking.
 - Usually one to three short sentences. Give more only when they ask you to explain.
 - When a question needs thinking (why, how, which is better, should I, a plan or a calculation), work it out, then
   give the answer with the one key reason. Don't lecture.
@@ -1675,6 +1703,7 @@ class Conversation:
         self.typing: dict | None = None   # typing mode: {"hwnd": window (None = my Edge), "where", "at", "n"}
         self._pictures = None         # board.Pictures (Wikipedia), made on the first "show me a picture of …"
         self.last_drawing = ""        # what was drawn last, for "draw it again"
+        self._recent_memes: list[str] = []   # the last few meme templates shown (so the next one is different)
 
     @property
     def pending(self) -> ToolResult | None:
@@ -1697,13 +1726,61 @@ class Conversation:
         return [{"role": "system", "content": prompt}] + thread
 
     async def reply(self, user_text: str) -> AsyncIterator[str]:
-        """Yield speakable sentences as they are generated; afterwards keep the thread, and learn from chat."""
+        """Yield speakable sentences as they are generated; afterwards keep the thread, learn from chat, and react with
+        a meme."""
+        typing = self.typing is not None                 # what you type in typing mode is never sent off for a meme
         async for sentence in self._reply(user_text):
             yield sentence
         if self.memory:
             self.memory.save_recent(self.history)
             if self.reply_kind == "chat":
                 self._learn_later(user_text)
+        if not typing and self.typing is None:
+            self._meme_later(user_text)
+
+    def _meme_later(self, user_text: str) -> None:
+        """Spidey reacts to every turn: a mood at once (from the words, nothing sent anywhere), then a meme for the
+        moment in its meme panel about a second later. The meme model gets only the two lines, redacted (no keys,
+        numbers or addresses), and nothing read from a page or window."""
+        from . import memes
+        from .board import STORE
+        from .untrusted import redact
+        maker = getattr(self.tools, "memes", None) if self.tools else None
+        if maker is None or self.notify is None or self.channel != "local" or self.settings.get("memes") is False:
+            return
+        last = next((m for m in reversed(self.history) if m["role"] == "assistant"), {})
+        answer = "" if last.get("tainted") or last.get("screen") else str(last.get("content") or "")
+        mood = memes.guess_mood(user_text, answer)
+        self._show({"type": "mood", "mood": mood})
+        cloud_only = getattr(self.llm, "cloud_only", None) if getattr(self.llm, "key", None) else None
+        recent = list(self._recent_memes)
+
+        async def go():
+            pick = None
+            if cloud_only and answer:
+                try:
+                    out = await cloud_only([{"role": "system", "content": memes.prompt(recent)},
+                                            {"role": "user", "content": f"THEY SAID: {redact(user_text)[:300]}\n"
+                                                                        f"SPIDEY ANSWERED: {redact(answer)[:300]}"}],
+                                           max_tokens=300, temperature=0.9, timeout=8.0,
+                                           model=self.settings.get("meme_model") or None)
+                except Exception:
+                    out = None
+                pick = memes.parse_pick(out or "")
+            pick = pick or memes.fallback_pick(mood)
+            try:
+                png = await asyncio.to_thread(maker.make, pick)
+            except Exception as exc:
+                self._log("tool", f"meme failed: {type(exc).__name__}: {exc}")
+                return
+            self._recent_memes = (self._recent_memes + [pick["t"]])[-4:]
+            self._show({"type": "meme", "id": STORE.put(png), "mood": pick["mood"], "template": pick["t"]})
+        try:
+            task = asyncio.get_running_loop().create_task(go())
+        except RuntimeError:
+            return
+        self._learning.add(task)
+        task.add_done_callback(self._learning.discard)
 
     def _learn_later(self, user_text: str) -> None:
         """In the background (no delay for you): let the cloud model note lasting facts you just told it."""
@@ -2100,6 +2177,12 @@ class Conversation:
             result = await self._board(name, args)
         elif name in ("tv_show", "tv_on", "tv_off", "tv_control", "tv_size", "tv_what"):
             result = await self._tv(name, args)
+        elif name == "set_memes":
+            on = bool(args.get("on"))
+            self.settings.update({"memes": on})
+            self._show({"type": "memes", "on": on})
+            result = ToolResult("Memes are back on. Brace yourself." if on else
+                                "Okay, no more memes. Say “memes on” whenever you miss them.")
         elif name == "set_io_mode":
             chat = args.get("mode") == "chat"
             self.settings.update({"io_mode": "chat" if chat else "voice"})
@@ -2114,7 +2197,7 @@ class Conversation:
                 await asyncio.sleep(0.5)
                 page = await asyncio.to_thread(self.tools.browser_read)
             if not page:
-                result = ToolResult("JARVIS's Edge window isn't open. Say “open YouTube” or “open Edge” first.")
+                result = ToolResult("My Edge window isn't open. Say “open YouTube” or “open Edge” first.")
             elif not args.get("summary") or not page.get("text"):
                 result = ToolResult(f"You're on {strip_urls(clean_label(page.get('title') or '', 120)) or 'a page with no title'}.",
                                     data=True)
@@ -2196,7 +2279,7 @@ class Conversation:
         # Security: websites only ever get what you said in this command. Nothing from memory, nothing from the laptop.
         known: list[str] = []
         done = list(done or [])
-        await asyncio.to_thread(edge.banner, "JARVIS is working on this page. Say stop to cancel.")
+        await asyncio.to_thread(edge.banner, "Spidey is working on this page. Say stop to cancel.")
         try:
             return await self._browser_task_rounds(goal, edge, cloud_only, known, done)
         finally:

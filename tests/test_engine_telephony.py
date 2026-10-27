@@ -39,7 +39,7 @@ async def run_engine(settings, script, stt_texts, llm_replies, seconds, setup=No
 def test_hands_free_wake_word(settings):
     settings.update({"mode": "hands_free", "activation": "wake_word", "silence_ms": 400})
     script = [("silence", 0.3), ("say", tone(0.6)), ("silence", 0.8), ("say", tone(0.6)), ("silence", 1.5)]
-    eng, ev = asyncio.run(run_engine(settings, script, ["talking about dinner", "Jarvis, hello there"],
+    eng, ev = asyncio.run(run_engine(settings, script, ["talking about dinner", "Spidey, hello there"],
                                      ["Hi. Good to hear you."], 4.5))
     assert any(e["type"] == "ignored" for e in ev)
     users = [e["text"] for e in ev if e["type"] == "transcript" and e["role"] == "user"]

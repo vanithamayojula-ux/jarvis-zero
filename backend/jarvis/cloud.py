@@ -318,22 +318,34 @@ class CloudLLM(OllamaLLM):
         return await super().complete(messages)
 
     async def cloud_only(self, messages: list[dict], max_tokens: int = 80, temperature: float = 0.0,
-                         timeout: float = 6.0) -> str | None:
-        """One quick cloud answer, or None (never the local model: the 3B is too slow and too wrong for this job)."""
-        if not (self.key and self.breaker.ok()):
+                         timeout: float = 6.0, model: str | None = None) -> str | None:
+        """One quick cloud answer, or None (never the local model: the 3B is too slow and too wrong for this job).
+        model: another Groq model for a side job (memes). Groq counts each model's free limits separately, so the side
+        job never uses up the chat model's minute, and its failures never pause the chat."""
+        side = bool(model) and model != self.cloud_model
+        if not self.key or (not side and not self.breaker.ok()):
             return None
         try:
             body = self._body(messages, None, False, max_tokens)
             body["messages"][0]["content"] = messages[0]["content"]          # no honesty note: this isn't chat
             body["temperature"] = temperature
+            if side:
+                body["model"] = model
+                body.pop("reasoning_effort", None)
+                body.pop("include_reasoning", None)
+                if model.startswith("openai/gpt-oss"):
+                    body.update(reasoning_effort="low", include_reasoning=False)
             r = await self._post(body, timeout=timeout)
             if r.status_code == 200:
                 return (r.json()["choices"][0]["message"]["content"] or "").strip()
+            if side:
+                return None
             self.breaker.trip(f"rewrite HTTP {r.status_code}", self.breaker.wait_for(r))
         except httpx.TransportError:
             pass        # a background helper (memory, rewording) failing must not push the next chat to the slow local model
         except Exception as exc:
-            self.breaker.trip(f"rewrite {type(exc).__name__}", 30.0)
+            if not side:
+                self.breaker.trip(f"rewrite {type(exc).__name__}", 30.0)
         return None
 
     def status(self) -> dict:

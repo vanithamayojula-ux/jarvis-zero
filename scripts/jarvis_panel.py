@@ -52,7 +52,7 @@ class Panel:
         self.dot = tk.Canvas(head, width=int(12 * s), height=int(12 * s), bg=BG, highlightthickness=0)
         self.dot_id = self.dot.create_oval(1, 1, int(11 * s), int(11 * s), fill=HINT, outline="")
         self.dot.pack(side="left")
-        tk.Label(head, text="JARVIS", bg=BG, fg=INK, font=(FONT, 12, "bold")).pack(side="left", padx=(int(6 * s), 0))
+        tk.Label(head, text="Spidey", bg=BG, fg=INK, font=(FONT, 12, "bold")).pack(side="left", padx=(int(6 * s), 0))
         self.state_lbl = tk.Label(head, text="", bg=BG, fg=HINT, font=(FONT, 9))
         self.state_lbl.pack(side="left", padx=(int(8 * s), 0))
         close = tk.Label(head, text="✕", bg=BG, fg=HINT, font=(FONT, 11), cursor="hand2")
@@ -137,7 +137,7 @@ class Panel:
         if not text:
             return
         if not self.link.online:
-            self._note("Can't reach JARVIS right now. Is it running?")
+            self._note("Can't reach Spidey right now. Is it running?")
             return
         self.entry.delete(0, "end")
         self.link.send(text)                       # JARVIS echoes it back as a transcript, which adds it to the log
@@ -148,7 +148,7 @@ class Panel:
 
     def toggle_screen(self):
         if not self.link.online:
-            self._note("Can't reach JARVIS right now. Is it running?")
+            self._note("Can't reach Spidey right now. Is it running?")
             return
         on = getattr(self.link, "screen_reading", True)
         self.link.send("stop looking at the screen" if on else "you can look at the screen again")
@@ -202,7 +202,7 @@ class Panel:
             lg.delete("end-2c")
             lg.insert("end", " " + text + "\n", "jarvis")
         else:
-            lg.insert("end", "JARVIS\n", "who_jarvis")
+            lg.insert("end", "Spidey\n", "who_jarvis")
             lg.insert("end", text + "\n", "jarvis")
         self.last_role = "user" if role == "user" else "assistant"
         lg.configure(state="disabled")
@@ -273,7 +273,7 @@ class Panel:
         self.screen_lbl.configure(text="Screen reading: on" if reading else "Screen reading: off", fg=HINT if reading else ACCENT)
         chord = " + ".join(w.capitalize() for w in str(getattr(link, "kill_chord", "")).split("+") if w)
         if getattr(link, "killed", False):
-            self.kill_lbl.configure(text="PAUSED: say or type resume to let JARVIS act again", fg="#d93025")
+            self.kill_lbl.configure(text="PAUSED: say or type resume to let Spidey act again", fg="#d93025")
         else:
             self.kill_lbl.configure(text=f"Stop everything: {chord}" if chord else "", fg=HINT)
         self.win.after(400, self._refresh)

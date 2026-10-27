@@ -101,10 +101,10 @@ def test_allowed_commands_are_parked_not_applied(client):
     r = patch(client, {"allowed_commands": GOOD})
     assert r.status_code == 202
     body = r.json()
-    assert body["pending"] == ["allowed_commands"] and "Say yes in JARVIS to allow it" in body["say"]
+    assert body["pending"] == ["allowed_commands"] and "Say yes to Spidey to allow it" in body["say"]
     assert server.S.settings.get("allowed_commands") == before          # not applied
     p = server.S.engine.conversation.pending
-    assert p and p.risk == "high" and "Say yes in JARVIS to allow it" in p.confirm_prompt
+    assert p and p.risk == "high" and "Say yes to Spidey to allow it" in p.confirm_prompt
     rows = server.S.audit.tail(5)
     assert rows[-1]["kind"] == "setting" and rows[-1]["label"] == "allowed_commands" and rows[-1]["outcome"] == "proposed"
     assert "ipconfig" not in json.dumps(rows)                           # what was asked for stays out of the log

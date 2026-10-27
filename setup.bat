@@ -1,8 +1,8 @@
 @echo off
-title JARVIS Zero setup
+title Spidey setup
 cd /d "%~dp0"
 if not exist ".venv\Scripts\python.exe" (
-  echo JARVIS Zero is not installed yet. Run install.ps1 first.
+  echo Spidey is not installed yet. Run install.ps1 first.
   pause
   exit /b 1
 )

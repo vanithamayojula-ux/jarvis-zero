@@ -73,7 +73,10 @@ def is_hallucination(text: str) -> bool:
 
 
 # How Whisper commonly mishears the wake word.
-WAKE_ALIASES = {"jarvis": {"travis", "jervis", "jarvas", "javis", "jarvi", "garvis", "charvis", "jarves", "jarviss", "davis"}}
+WAKE_ALIASES = {"jarvis": {"travis", "jervis", "jarvas", "javis", "jarvi", "garvis", "charvis", "jarves", "jarviss", "davis"},
+                "spidey": {"spidy", "spiddy", "spidie", "spidee", "speedy", "spidi", "spaidy"}}
+# Close to the wake word but everyday words: "a spider in my room", "something spicy" mustn't wake it.
+NOT_WAKE = {"spidey": {"spider", "spiders", "spicy", "spice", "spiky", "speed", "spines", "spinny", "sticky", "spidery"}}
 
 
 def find_wake_word(text: str, wake: str) -> tuple[bool, str]:
@@ -89,6 +92,8 @@ def find_wake_word(text: str, wake: str) -> tuple[bool, str]:
         if seen > 4:
             break
         bare = re.sub(r"'s$", "", w.lower())
+        if bare in NOT_WAKE.get(wake, ()):
+            continue
         if bare == wake or bare in WAKE_ALIASES.get(wake, ()) or \
                 (len(bare) >= 5 and difflib.SequenceMatcher(None, bare, wake).ratio() >= 0.72):
             rest = "".join(x if not re.match(r"\w", x) else " " + x for x in words[i + 1:]).lstrip(" ,.!?").rstrip()
@@ -584,7 +589,8 @@ class Engine:
             if not self._yes_ignored:
                 self._yes_ignored = True
                 self._voice_log("IGNORED once (risky yes without wake word)")
-                self.emit({"type": "ignored", "text": text, "reason": "say “Jarvis, yes” to confirm"})
+                self.emit({"type": "ignored", "text": text,
+                           "reason": f"say “{self.settings.get('wake_word').capitalize()}, yes” to confirm"})
                 self._set_state("idle")
                 return
         self._yes_ignored = False

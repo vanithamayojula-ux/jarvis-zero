@@ -635,7 +635,7 @@ class BoardStore:
             return self._items.get(bid)
 
 
-STORE = BoardStore()
+STORE = BoardStore(keep=24)       # board pictures and spidey's memes (a meme follows every reply)
 
 
 def render_png(drawing: dict, scale: float = 2.0) -> bytes:

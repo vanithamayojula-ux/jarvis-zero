@@ -84,7 +84,7 @@ export default function App() {
   return (
     <div className="app">
       <header>
-        <div className="brand"><span className={`dot ${online ? "ok" : "bad"}`} /> JARVIS <em>Zero</em></div>
+        <div className="brand"><span className={`dot ${online ? "ok" : "bad"}`} /> Spidey</div>
         <div className="badges">
           <span className="badge">LOCAL AUDIO</span>
           <span className={`badge ${llmReady ? "ok" : "warn"}`}>{llmReady ? "LLM ready" : "LLM loading"}</span>
@@ -200,8 +200,8 @@ function VoicePanel(p: {
         </div>
         <p className="hint"><b>From any window:</b> press <kbd>{(p.settings.listen_hotkey || "ctrl+alt+space").split("+").map((k: string) => k[0].toUpperCase() + k.slice(1)).join(" + ")}</kbd>, then just speak.</p>
         <p className="hint">{ptt ? "In this window you can also hold the button or Space while you speak."
-          : p.settings.activation === "wake_word" ? `Start with “${p.settings.wake_word}” (e.g. “Jarvis, what time is it?”), then keep talking normally for ${p.settings.followup_s} s after each reply. Processed on this PC only.`
-          : "JARVIS answers any speech. Best with headphones."}</p>
+          : p.settings.activation === "wake_word" ? `Start with “${p.settings.wake_word}” (e.g. “${p.settings.wake_word}, what time is it?”), then keep talking normally for ${p.settings.followup_s} s after each reply. Processed on this PC only.`
+          : "Spidey answers any speech. Best with headphones."}</p>
         {p.confirmPrompt && (
           <div className="confirm">
             <span>{p.choices ? "Which one?" : p.confirmPrompt}</span>
@@ -237,13 +237,13 @@ function VoicePanel(p: {
           {p.lines.length === 0 && <p className="empty">Say something, or type below.</p>}
           {p.lines.map((l, i) => (
             <div key={i} className={`line ${l.role}`}>
-              <span className="who">{{ user: "You", assistant: "JARVIS", heard: "Heard", ignored: "Ignored", system: "•" }[l.role]}</span>
+              <span className="who">{{ user: "You", assistant: "Spidey", heard: "Heard", ignored: "Ignored", system: "•" }[l.role]}</span>
               <span className="text">{l.text}{l.meta && <small> — {l.meta}</small>}</span>
             </div>
           ))}
         </div>
         <form className="say" onSubmit={(e) => { e.preventDefault(); send(); }}>
-          <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type to JARVIS…" />
+          <input value={text} onChange={(e) => setText(e.target.value)} placeholder="Type to Spidey…" />
           <button className="primary">Send</button>
         </form>
       </section>
@@ -300,7 +300,7 @@ function CallsPanel({ tel, settings, update, refresh }: { tel: TelephonyStatus; 
   const setAllowed = (list: string[]) => update({ telephony: { sip_allowed_ips: Array.from(new Set(list.filter(Boolean))) } });
   const addNet = (net: string, warn = false) => {
     if (!net) return;
-    if (warn && !confirm(`Allow every device on ${net} to call JARVIS?\n\nOnly do this for a network that only you use (your own hotspot). Never for hostel, campus or cafe Wi-Fi.`)) return;
+    if (warn && !confirm(`Allow every device on ${net} to call Spidey?\n\nOnly do this for a network that only you use (your own hotspot). Never for hostel, campus or cafe Wi-Fi.`)) return;
     setAllowed([...allowedList, net.trim()]);
   };
   const copy = async (text: string) => {
@@ -320,9 +320,9 @@ function CallsPanel({ tel, settings, update, refresh }: { tel: TelephonyStatus; 
   return (
     <main className="grid calls">
       <section className="card" style={{ gridColumn: "1 / -1" }}>
-        <h2>Call JARVIS from your phone <span className="tag lan">FREE · LOCAL NETWORK</span></h2>
+        <h2>Call Spidey from your phone <span className="tag lan">FREE · LOCAL NETWORK</span></h2>
         <p>Your phone calls this laptop directly with a free softphone app. No phone number, no account, no internet, ₹0.
-          JARVIS answers, tells the caller it's an AI, and talks.</p>
+          Spidey answers, tells the caller it's an AI, and talks.</p>
 
         <table className="matrix"><tbody>
           <tr><td>SIP listener</td>
@@ -374,7 +374,7 @@ function CallsPanel({ tel, settings, update, refresh }: { tel: TelephonyStatus; 
           <li>No account is needed. Skip the sign-in screens, open the dialer and type the address above
             (<code>sip:jarvis@{exampleIp}:{port}</code>), then press call. Tip: scan the QR code with the phone's camera to copy the address instead of typing it.</li>
           <li>If your Linphone version insists on an account: choose <i>Use a SIP account</i> / <i>Third-party SIP account</i> with
-            username <code>phone</code>, any password, domain <code>{exampleIp}:{port}</code>, transport <b>UDP</b>. JARVIS accepts that sign-in locally. Then dial <code>jarvis</code>.</li>
+            username <code>phone</code>, any password, domain <code>{exampleIp}:{port}</code>, transport <b>UDP</b>. Spidey accepts that sign-in locally. Then dial <code>jarvis</code>.</li>
           <li>In Linphone settings keep <b>Media encryption: None</b> and the <b>PCMU/PCMA (G.711)</b> codecs enabled.</li>
           <li><b>Zoiper</b> (free) works the same way: add an account with username <code>phone</code>, any password, domain <code>{exampleIp}:{port}</code>, skip the provider search, then dial <code>jarvis</code>.</li>
         </ol>
@@ -405,13 +405,13 @@ function CallsPanel({ tel, settings, update, refresh }: { tel: TelephonyStatus; 
           <input value={owners} onChange={(e) => setOwners(e.target.value)} placeholder="e.g. 192.168.137.23"
             onBlur={() => update({ telephony: { owner_ips: owners.split(/[\s,]+/).filter(Boolean) } })} />
         </label>
-        <small>Calls from these addresses can use JARVIS's laptop tools (open apps, websites, reminders), with the same
+        <small>Calls from these addresses can use Spidey's laptop tools (open apps, websites, reminders), with the same
           confirmations as on the laptop. Leave empty for a talk-only assistant. Only list your own phone on a hotspot only you use:
           on a shared network another device could pretend to have that address.</small>
 
         <h3>Honest note about hostel Wi-Fi</h3>
         <small>Hostel and campus Wi-Fi (for example "LPU Hostels-5G") almost always blocks devices from reaching each other
-          (client isolation), and Windows treats it as a Public network. So calling over it will not work, and JARVIS deliberately
+          (client isolation), and Windows treats it as a Public network. So calling over it will not work, and Spidey deliberately
           ignores it. Use a personal hotspot instead: the call audio stays between the two devices and uses no mobile data.
           Real phone numbers are not supported and stay disabled.</small>
         {phone?.error && <p className="bad"><small>Last SIP error: {phone.error}</small></p>}
@@ -453,7 +453,7 @@ function CallsPanel({ tel, settings, update, refresh }: { tel: TelephonyStatus; 
             </div>
             <div className="log small">
               {call.transcript.map((t, i) => <div key={i} className={`line ${t.role === "caller" ? "user" : "assistant"}`}>
-                <span className="who">{t.role === "caller" ? "Caller" : t.role === "operator" ? "You" : "JARVIS"}</span><span className="text">{t.text}</span></div>)}
+                <span className="who">{t.role === "caller" ? "Caller" : t.role === "operator" ? "You" : "Spidey"}</span><span className="text">{t.text}</span></div>)}
             </div>
             {call.provider === "mock" && (
               <form className="say" onSubmit={async (e) => { e.preventDefault(); await api("/telephony/simulate/say", "POST", { call_id: call.id, text: say }); setSay(""); }}>
@@ -469,7 +469,7 @@ function CallsPanel({ tel, settings, update, refresh }: { tel: TelephonyStatus; 
             </div>
             {!call.ai_active && (
               <form className="say" onSubmit={async (e) => { e.preventDefault(); await api("/telephony/operator-say", "POST", { call_id: call.id, text: operator }); setOperator(""); }}>
-                <input value={operator} onChange={(e) => setOperator(e.target.value)} placeholder="Type a reply; JARVIS speaks it into the call" />
+                <input value={operator} onChange={(e) => setOperator(e.target.value)} placeholder="Type a reply; Spidey speaks it into the call" />
                 <button>Speak</button>
               </form>
             )}
@@ -562,7 +562,7 @@ function SettingsPanel({ settings, update }: { settings: Settings; update: (c: S
           </select>
         </label>
         <label className="row toggle"><input type="checkbox" checked={settings.barge_in} onChange={(e) => update({ barge_in: e.target.checked })} />
-          Let me interrupt JARVIS by talking</label>
+          Let me interrupt Spidey by talking</label>
         <label className="row">End-of-turn silence: {settings.silence_ms} ms
           <input type="range" min={300} max={1500} step={50} value={settings.silence_ms} onChange={(e) => update({ silence_ms: Number(e.target.value) })} />
         </label>
@@ -582,7 +582,7 @@ function SettingsPanel({ settings, update }: { settings: Settings; update: (c: S
         </label>
         <label className="row">Personality
           <select value={settings.personality} onChange={(e) => update({ personality: e.target.value })}>
-            <option value="jarvis">JARVIS (dry British wit)</option>
+            <option value="jarvis">Spidey (dry British wit)</option>
             <option value="friendly">Friendly</option>
             <option value="concise">Concise</option>
           </select>

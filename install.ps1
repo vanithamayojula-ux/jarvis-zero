@@ -103,5 +103,5 @@ if (-not (Test-Path ".env")) { Copy-Item ".env.example" ".env"; (Get-Content ".e
 Step "Running quick tests (no microphone needed)"
 & .venv\Scripts\python.exe -m pytest -q -m "not slow"
 
-Write-Host "`nDone. Start JARVIS with start-jarvis.bat, then open http://127.0.0.1:8600" -ForegroundColor Green
-Write-Host "Optional: python scripts\calibrate_echo.py   (measures speaker echo so you can interrupt JARVIS reliably)"
+Write-Host "`nDone. Start Spidey with start-jarvis.bat, then open http://127.0.0.1:8600" -ForegroundColor Green
+Write-Host "Optional: python scripts\calibrate_echo.py   (measures speaker echo so you can interrupt Spidey reliably)"

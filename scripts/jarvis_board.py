@@ -108,7 +108,7 @@ class Board:
             d = validate_drawing(ev.get("drawing"))
             self.busy = ""
             if d:
-                self._add({"kind": "drawing", "title": title or d["title"] or "A drawing", "source": "drawn by JARVIS",
+                self._add({"kind": "drawing", "title": title or d["title"] or "A drawing", "source": "drawn by Spidey",
                            "drawing": d})
         elif kind == "image":
             bid = str(ev.get("id") or "")
@@ -189,7 +189,7 @@ class Board:
                 self.title_lbl.configure(text="Picture board")
                 self.src_lbl.configure(text="")
                 c.create_text(w / 2, h / 2, width=w - 40 * s, justify="center", fill=HINT, font=(FONT, 10),
-                              text="Ask JARVIS “show me a picture of a red panda” or “draw a rocket”, "
+                              text="Ask Spidey “show me a picture of a red panda” or “draw a rocket”, "
                                    "or drop a picture on spidey.")
             for lbl in (self.page_lbl, self.redraw_lbl):
                 lbl.pack_forget()
@@ -299,7 +299,7 @@ class Board:
             folder = Path.home() / "Downloads"
             folder = folder if folder.is_dir() else Path.home()
             name = re.sub(r"[^\w\- ]+", "", item["title"]).strip()[:40] or "picture"
-            path = folder / f"JARVIS {name} {datetime.now():%Y-%m-%d %H%M%S}.png"
+            path = folder / f"Spidey {name} {datetime.now():%Y-%m-%d %H%M%S}.png"
             path.write_bytes(png)
             self._note(f"Saved to {folder.name}")
         except Exception:

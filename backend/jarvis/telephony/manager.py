@@ -205,7 +205,7 @@ class TelephonyManager:
     async def _greet(self, rt: _CallRuntime) -> None:
         user = self.settings.get("user_name") or "the owner of this computer"
         notice = " I keep a text transcript of calls on this computer." if self.settings.get("save_conversations") else ""
-        text = f"Hi, this is JARVIS, an AI assistant answering for {user}.{notice} How can I help?"
+        text = f"Hi, this is Spidey, an AI assistant answering for {user}.{notice} How can I help?"
         rt.conversation.history.append({"role": "assistant", "content": text})
         await self._speak(rt, text)
 
