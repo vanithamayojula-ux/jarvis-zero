@@ -110,6 +110,29 @@ class Microphone:
         self.level = 0.0
 
 
+class NullSpeaker:
+    """Chat mode: no sound and no audio stream at all (an open stream wakes the CPU ~40 times a second)."""
+
+    level = 0.0
+    busy = False
+
+    def __init__(self, sample_rate: int = 16000, device: int | None = None):
+        self.sample_rate = sample_rate
+        self.clips_started = 0
+
+    def play(self, clip: np.ndarray) -> None:
+        self.clips_started += 1
+
+    def stop(self) -> None:
+        pass
+
+    def wait_idle(self, timeout: float | None = None) -> bool:
+        return True
+
+    def close(self) -> None:
+        pass
+
+
 class Speaker:
     """Plays queued int16 clips; stop() cuts playback instantly (for barge-in)."""
 

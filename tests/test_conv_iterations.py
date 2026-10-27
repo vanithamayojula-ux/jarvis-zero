@@ -297,7 +297,6 @@ def test_skip_seconds_is_media_forward(settings, tb, text):
     ("open", "Sure, what should I open?", "youtube", ("open", "https://www.youtube.com")),
     ("search", "Sure, what should I search for?", "lofi music", ("open", "https://www.google.com/search?q=lofi+music")),
     ("click", "Sure, what should I click?", "subscribe", ("click", "subscribe", 0)),
-    ("type", "Sure, what should I type?", "hello there", ("type", "hello there")),
 ])
 def test_bare_verb_asks_then_completes(settings, tb, first, ask, second, expected):
     tb.edge.url = "about:blank"

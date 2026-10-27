@@ -203,6 +203,13 @@ class CloudLLM(OllamaLLM):
         self.breaker = _Breaker()
         self.last_source = "local"
 
+    async def warm(self, system_prompt: str = "") -> None:
+        """The cloud answers, so don't park the local model in RAM (~2.8 GB) just in case: only check Ollama is up.
+        If the cloud ever fails, the first local reply loads it (~10 s) and keep_alive unloads it again later."""
+        if not self.key:
+            return await super().warm(system_prompt)
+        (await self.client.get(f"{self.url}/api/tags", timeout=5.0)).raise_for_status()
+
     def _body(self, messages: list[dict], tools, stream: bool, max_tokens: int) -> dict:
         msgs = _openai_messages(messages)
         if msgs and msgs[0]["role"] == "system":
@@ -223,74 +230,108 @@ class CloudLLM(OllamaLLM):
             async for chunk in super().stream(messages, tools):
                 yield chunk
             return
-        yielded = False
-        try:
-            async with self.cloud.stream("POST", f"{GROQ}/chat/completions", headers={"Authorization": f"Bearer {self.key}"},
-                                         json=self._body(messages, tools, True, 260)) as resp:
-                if resp.status_code != 200:
-                    await resp.aread()
-                    self.breaker.trip(f"chat HTTP {resp.status_code}: {resp.text[:160]}", self.breaker.wait_for(resp))
-                else:
-                    self.last_source = "cloud"
-                    calls: dict[int, dict] = {}
-                    async for line in resp.aiter_lines():
-                        if not line.startswith("data: ") or line.strip() == "data: [DONE]":
-                            continue
-                        delta = (json.loads(line[6:]).get("choices") or [{}])[0].get("delta") or {}
-                        for tc in delta.get("tool_calls") or []:   # tool calls arrive in pieces
-                            c = calls.setdefault(tc.get("index", 0), {"name": "", "arguments": ""})
-                            fn = tc.get("function") or {}
-                            c["name"] += fn.get("name") or ""
-                            c["arguments"] += fn.get("arguments") or ""
-                        if delta.get("content"):
-                            yielded = True
-                            yield LLMChunk(text=delta["content"])
-                    if calls:
-                        out = []
-                        for c in calls.values():
-                            try:
-                                args = json.loads(c["arguments"] or "{}")
-                            except ValueError:
-                                args = {}
-                            out.append({"name": c["name"], "arguments": args})
-                        yielded = True
-                        yield LLMChunk(tool_calls=out)
+        for attempt in (1, 2):
+            state = {"yielded": False}
+            try:
+                async for chunk in self._cloud_stream(messages, tools, state):
+                    yield chunk
+                if state.get("done"):
                     return
-        except Exception as exc:
-            self.breaker.trip(f"chat {type(exc).__name__}", 30.0)
-            if yielded:                                    # cut off mid-reply: don't start a second, different one
-                return
+                break                                      # an HTTP error reply: the breaker is already set
+            except httpx.TransportError as exc:
+                # Usually a kept-alive connection Groq had already closed ("Server disconnected"): one retry on a
+                # fresh connection almost always works, and is far quicker than loading the local model (~10-20 s).
+                if state["yielded"]:
+                    self.breaker.trip(f"chat {type(exc).__name__}", 5.0)
+                    return                                 # cut off mid-reply: don't start a second, different one
+                if attempt == 2:
+                    self.breaker.trip(f"chat {type(exc).__name__}", 8.0)
+            except Exception as exc:
+                self.breaker.trip(f"chat {type(exc).__name__}", 30.0)
+                if state["yielded"]:
+                    return
+                break
         self.last_source = "local"
         async for chunk in super().stream(messages, tools):
             yield chunk
 
+    async def _cloud_stream(self, messages: list[dict], tools, state: dict) -> AsyncIterator[LLMChunk]:
+        """One streamed Groq request. state["yielded"]: output has gone out; state["done"]: finished normally."""
+        async with self.cloud.stream("POST", f"{GROQ}/chat/completions", headers={"Authorization": f"Bearer {self.key}"},
+                                     json=self._body(messages, tools, True, 260)) as resp:
+            if resp.status_code != 200:
+                await resp.aread()
+                self.breaker.trip(f"chat HTTP {resp.status_code}: {resp.text[:160]}", self.breaker.wait_for(resp))
+                return
+            self.last_source = "cloud"
+            calls: dict[int, dict] = {}
+            async for line in resp.aiter_lines():
+                if not line.startswith("data: ") or line.strip() == "data: [DONE]":
+                    continue
+                delta = (json.loads(line[6:]).get("choices") or [{}])[0].get("delta") or {}
+                for tc in delta.get("tool_calls") or []:   # tool calls arrive in pieces
+                    c = calls.setdefault(tc.get("index", 0), {"name": "", "arguments": ""})
+                    fn = tc.get("function") or {}
+                    c["name"] += fn.get("name") or ""
+                    c["arguments"] += fn.get("arguments") or ""
+                if delta.get("content"):
+                    state["yielded"] = True
+                    yield LLMChunk(text=delta["content"])
+            if calls:
+                out = []
+                for c in calls.values():
+                    try:
+                        args = json.loads(c["arguments"] or "{}")
+                    except ValueError:
+                        args = {}
+                    out.append({"name": c["name"], "arguments": args})
+                state["yielded"] = True
+                yield LLMChunk(tool_calls=out)
+            state["done"] = True
+
+    async def _post(self, body: dict, timeout: float | None = None) -> httpx.Response:
+        """POST to Groq, retrying once on a dropped connection (a stale kept-alive one, usually)."""
+        kw = {"timeout": timeout} if timeout else {}
+        try:
+            return await self.cloud.post(f"{GROQ}/chat/completions", headers={"Authorization": f"Bearer {self.key}"},
+                                         json=body, **kw)
+        except (httpx.RemoteProtocolError, httpx.ReadError, httpx.WriteError, httpx.ConnectError):
+            return await self.cloud.post(f"{GROQ}/chat/completions", headers={"Authorization": f"Bearer {self.key}"},
+                                         json=body, **kw)
+
     async def complete(self, messages: list[dict]) -> str:
         if self.key and self.breaker.ok():
             try:
-                r = await self.cloud.post(f"{GROQ}/chat/completions", headers={"Authorization": f"Bearer {self.key}"},
-                                          json=self._body(messages, None, False, 700))
+                r = await self._post(self._body(messages, None, False, 700))
                 if r.status_code == 200:
                     self.last_source = "cloud"
                     return r.json()["choices"][0]["message"]["content"] or ""
                 self.breaker.trip(f"complete HTTP {r.status_code}", self.breaker.wait_for(r))
             except Exception as exc:
-                self.breaker.trip(f"complete {type(exc).__name__}", 30.0)
+                self.breaker.trip(f"complete {type(exc).__name__}", 8.0 if isinstance(exc, httpx.TransportError) else 30.0)
         self.last_source = "local"
         return await super().complete(messages)
 
-    async def cloud_only(self, messages: list[dict], max_tokens: int = 80) -> str | None:
+    async def local_complete(self, messages: list[dict]) -> str:
+        """Like complete(), but only ever the model on this laptop (used for anything read from the screen)."""
+        self.last_source = "local"
+        return await super().complete(messages)
+
+    async def cloud_only(self, messages: list[dict], max_tokens: int = 80, temperature: float = 0.0,
+                         timeout: float = 6.0) -> str | None:
         """One quick cloud answer, or None (never the local model: the 3B is too slow and too wrong for this job)."""
         if not (self.key and self.breaker.ok()):
             return None
         try:
             body = self._body(messages, None, False, max_tokens)
             body["messages"][0]["content"] = messages[0]["content"]          # no honesty note: this isn't chat
-            body["temperature"] = 0.0
-            r = await self.cloud.post(f"{GROQ}/chat/completions", headers={"Authorization": f"Bearer {self.key}"},
-                                      json=body, timeout=6.0)
+            body["temperature"] = temperature
+            r = await self._post(body, timeout=timeout)
             if r.status_code == 200:
                 return (r.json()["choices"][0]["message"]["content"] or "").strip()
             self.breaker.trip(f"rewrite HTTP {r.status_code}", self.breaker.wait_for(r))
+        except httpx.TransportError:
+            pass        # a background helper (memory, rewording) failing must not push the next chat to the slow local model
         except Exception as exc:
             self.breaker.trip(f"rewrite {type(exc).__name__}", 30.0)
         return None

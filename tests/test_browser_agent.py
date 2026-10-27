@@ -71,7 +71,7 @@ def test_stop_scrolling_phrases(settings):
 
 # ---------- one field at a time ----------
 @pytest.mark.parametrize("text, step", [
-    ("type Yash in the name field", ("browser_fill", {"field": "name", "value": "yash"})),
+    ("type Yash in the name field", ("browser_fill", {"field": "name", "value": "Yash"})),   # capitals kept
     ("fill the email field with yash@example.com", ("browser_fill", {"field": "email", "value": "yash@example.com"})),
     ("choose India from the country dropdown", ("browser_fill", {"field": "country", "value": "india"})),
     ("tick the terms checkbox", ("browser_check", {"label": "terms", "on": True})),

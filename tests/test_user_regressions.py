@@ -27,7 +27,8 @@ def say(conv, text):
 @pytest.mark.parametrize("text,first_step", [
     ("Shut down the laptop.", "cant"),
     ("Turn the volume up.", "system_volume"),     # JARVIS can do this since 22 Oct
-    ("Turn on bluetooth.", "cant"),
+    ("Turn on bluetooth.", "open_settings"),      # can't flip it, but opens the Bluetooth page with an honest sentence
+    ("Turn off the night light settings app.", "cant"),
     ("What's the weather today?", "cant"),
     ("Close it.", "cant"),
     ("Start a timer for 5 minutes.", "create_reminder"),

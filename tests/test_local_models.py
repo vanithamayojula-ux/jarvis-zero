@@ -87,8 +87,11 @@ def test_ollama_local_streaming():
         if not await llm.health():
             pytest.skip("Ollama not running or model missing")
         text = ""
-        async for chunk in llm.stream([{"role": "user", "content": "Say the word ready."}]):
-            text += chunk.text
+        try:
+            async for chunk in llm.stream([{"role": "user", "content": "Say the word ready."}]):
+                text += chunk.text
+        finally:
+            await llm.unload()                  # don't leave 2.3 GB in RAM after a test run
         return text
 
     assert "ready" in asyncio.run(go()).lower()

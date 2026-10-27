@@ -1,6 +1,11 @@
 """python -m jarvis  →  starts the backend on http://127.0.0.1:8600"""
 import logging
+import os
 import re
+
+# numpy's OpenBLAS reserves ~32 MB per CPU thread (~500 MB here) for big matrix maths JARVIS never does. Must be set
+# before numpy is first imported.
+os.environ.setdefault("OPENBLAS_NUM_THREADS", "2")
 
 import uvicorn
 

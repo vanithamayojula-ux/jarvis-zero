@@ -39,6 +39,10 @@ PERSONALITIES = {
 }
 
 DEFAULTS: dict = {
+    # chat = type and read (no mic, no voice, no speech models in memory: lightest) | voice = talk and hear
+    "io_mode": "voice",
+    "web_search": True,                  # look things up online when a search key is in .env (only the query is sent)
+    "search_provider": "auto",           # auto (first key found) | tavily | brave | serper
     "mode": "push_to_talk",              # push_to_talk | hands_free
     "listen_hotkey": "ctrl+alt+j",       # works in any window: press, speak, JARVIS answers (no wake word)
     "activation": "wake_word",           # hands-free trigger: wake_word | voice
@@ -59,7 +63,7 @@ DEFAULTS: dict = {
     "stt_model": "base.en",
     "llm_model": "llama3.2:3b",
     "ollama_url": "http://127.0.0.1:11434",
-    "llm_keep_alive": -1,                # keep the model loaded while JARVIS runs (unloaded on exit)
+    "llm_keep_alive": "10m",             # unload after 10 idle minutes to free ~2.3 GB RAM (-1 = keep loaded)
     "history_turns": 8,
     "llm_tool_calling": False,           # let the LLM pick tools too (slow + unreliable on 3B CPU models)
     "personality": "human",
@@ -88,6 +92,14 @@ DEFAULTS: dict = {
     "site_allowlist": [],                # sites you've decided are safe even if a blocklist disagrees
     "blocklist_auto_update": True,       # refresh the free malware/phishing/scam lists once a week
     "desktop_control": True,             # click / type / press keys in any app (never terminals, password boxes…)
+    "kill_hotkey": "ctrl+alt+backspace", # emergency stop: freezes every click and key until you say "resume"
+    "insecure_no_token": False,          # tests only: lets the API run with no secret token (never settable by the API)
+    "highlight_actions": True,           # draw a ring where JARVIS is about to click (display only; spidey draws it)
+    "picture_board": True,               # "show me a picture of …" (Wikipedia) and "draw …" on spidey's picture board
+    "mini_tv": True,                     # "play lofi on the TV": a small always-on-top window beside spidey (data/edge-tv)
+    "tv_size": "medium",                 # small | medium | large ("make the TV bigger")
+    "screen_reading": True,            # read the current window when asked (UI Automation, then offline OCR); never leaves the laptop
+    "screen_to_cloud": False,          # sending screen contents to a cloud model: off, and only ever by your say-so
     "cloud_ai": True,                    # use Groq's free tier when GROQ_API_KEY is in .env (local models as backup)
     "cloud_llm_model": "qwen/qwen3.8-27b",
     "cloud_stt_model": "whisper-large-v3-turbo",

@@ -10,6 +10,7 @@ import threading
 import time
 import uuid
 import webbrowser
+from collections import deque
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from pathlib import Path
@@ -18,6 +19,14 @@ from urllib.parse import quote, quote_plus, urlparse
 
 from .browser import MESSAGING_HOSTS, PUBLISH_WORDS, BrowserError
 from .config import DATA_DIR, Settings
+from .gate import (CONFIRM_COMBOS, PRESSABLE_COMBOS, SAY_NO_COMBO, SAY_READING_OFF, WINDOW_VERBS, Action, Decision, Gate,
+                   normalize_combo)
+from .untrusted import clean_label, redact
+
+try:                                   # Windows' accessibility layer reports "that app stopped responding" this way
+    from _ctypes import COMError
+except ImportError:                    # pragma: no cover (not Windows)
+    COMError = None
 
 
 @dataclass
@@ -27,6 +36,14 @@ class ToolResult:
     confirm_prompt: str = ""                   # what JARVIS asks the user
     run_confirmed: Callable[[], ToolResult] | None = None
     choices: list[tuple[str, Callable[[], ToolResult]]] | None = None   # "which one?" options
+    risk: str = "low"                          # "high" = a send / buy / delete / press: only a whole-sentence "yes" counts
+    expires_s: float = 30.0                    # a yes/no question dies after this long
+    fingerprint: tuple | None = None           # what was on screen when we asked (window, control)
+    verify: Callable[[], bool] | None = None   # re-checks that nothing changed between the question and the yes
+    data: bool = False                         # text read from the screen or a page: DATA, never routed as a command
+    log: str = ""                              # what may be logged instead of text (data results: names and lengths only)
+    payload: str = ""                          # data results: the redacted text a summary may be written from
+    flagged: bool = False                      # the data contained orders aimed at the assistant (said out loud)
 
 # Never opened directly: these run code. Apps go through approved_apps or Desktop shortcuts instead.
 BLOCKED_EXTENSIONS = {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".msi", ".scr",
@@ -58,6 +75,63 @@ SEARCH_URLS = {
 }
 
 MEDIA_HOSTS = ("youtube.com", "netflix.com", "spotify.com", "hotstar.com", "primevideo.com", "twitch.tv")
+
+# "open display settings": only these fixed Windows settings pages, looked up by name. Nothing the person says (or a page
+# says) is ever put into the address that gets opened.
+SETTINGS_PAGES = {
+    "wifi": "ms-settings:network-wifi", "bluetooth": "ms-settings:bluetooth", "display": "ms-settings:display",
+    "sound": "ms-settings:sound", "battery": "ms-settings:batterysaver", "storage": "ms-settings:storagesense",
+    "windows update": "ms-settings:windowsupdate", "default apps": "ms-settings:defaultapps",
+    "night light": "ms-settings:nightlight", "privacy": "ms-settings:privacy", "network": "ms-settings:network",
+    "notifications": "ms-settings:notifications", "apps": "ms-settings:appsfeatures", "about": "ms-settings:about",
+    "airplane mode": "ms-settings:network-airplanemode",
+}
+SETTINGS_NAMES = {"wifi": "Wi-Fi", "bluetooth": "Bluetooth", "display": "Display", "sound": "Sound", "battery": "Battery",
+                  "storage": "Storage", "windows update": "Windows Update", "default apps": "Default apps",
+                  "night light": "Night light", "privacy": "Privacy", "network": "Network", "notifications": "Notifications",
+                  "apps": "Apps", "about": "About", "airplane mode": "Airplane mode"}
+SETTINGS_ALIASES = {"wi fi": "wifi", "wi-fi": "wifi", "wireless": "wifi", "internet": "network", "updates": "windows update",
+                    "update": "windows update", "battery saver": "battery", "power": "battery", "airplane": "airplane mode",
+                    "flight mode": "airplane mode", "screen": "display", "volume": "sound", "audio": "sound",
+                    "default app": "default apps", "installed apps": "apps", "notification": "notifications"}
+assert all(v.startswith("ms-settings:") and not re.search(r"[\s&]", v) for v in SETTINGS_PAGES.values())
+# folders the shell opens by name (also literals)
+SHELL_FOLDERS = {"recycle bin": "shell:RecycleBinFolder", "this pc": "shell:MyComputerFolder",
+                 "my computer": "shell:MyComputerFolder"}
+assert all(v.startswith("shell:") and not re.search(r"[\s&]", v) for v in SHELL_FOLDERS.values())
+
+
+def _cmd_safe(url: str) -> bool:
+    """May this address be handed to `cmd /c start`? No whitespace and none of & | ^ < > " — and a % only as part of a
+    percent-escape like %20 (a bare %NAME% would be expanded by cmd)."""
+    return not re.search(r'[\s&|^<>"]', url) and not re.search(r"%(?![0-9A-Fa-f]{2})", url)
+
+
+def settings_key(text: str) -> str | None:
+    """'blue tooth' / 'wi-fi' / 'windows update' → the SETTINGS_PAGES key, or None. Exact name or alias, else a close match."""
+    t = re.sub(r"\s+", " ", re.sub(r"[^a-z0-9 -]", "", str(text).lower())).strip()
+    t = re.sub(r"^(?:the|my)\s+", "", t)
+    t = SETTINGS_ALIASES.get(t, t)
+    if t in SETTINGS_PAGES:
+        return t
+    pool = [*SETTINGS_PAGES, *SETTINGS_ALIASES]
+    close = difflib.get_close_matches(t, pool, n=1, cutoff=0.8) or difflib.get_close_matches(t.replace(" ", ""),
+                                                                                           [k.replace(" ", "") for k in pool], n=1, cutoff=0.8)
+    if not close:
+        return None
+    name = next((k for k in pool if k == close[0] or k.replace(" ", "") == close[0]), close[0])
+    return SETTINGS_ALIASES.get(name, name)
+
+
+# what a shortcut does, for saying it out loud
+COMBO_SAYS = {"ctrl+s": "save", "ctrl+c": "copy", "ctrl+v": "paste", "ctrl+x": "cut", "ctrl+z": "undo", "ctrl+y": "redo",
+              "ctrl+a": "select all", "ctrl+f": "find", "ctrl+n": "new", "ctrl+t": "new tab", "ctrl+w": "close the tab",
+              "ctrl+p": "print", "ctrl+tab": "next tab", "ctrl+shift+t": "reopen the last closed tab", "alt+left": "back",
+              "alt+right": "forward", "f5": "refresh", "f11": "full screen", "alt+f4": "close the window",
+              "ctrl+shift+delete": "clear browsing data", "ctrl+shift+n": "a private window"}
+WINDOW_SAYS = {"minimize": "Minimised {n}.", "maximize": "Maximised {n}.", "restore": "Restored {n}.",
+               "snap_left": "Snapped {n} to the left.", "snap_right": "Snapped {n} to the right.",
+               "switch": "Switched to {n}.", "show_desktop": "Showing the desktop."}
 
 # Other names people (or speech recognition) use for apps.
 APP_ALIASES = {"chroma": "chrome", "crome": "chrome", "google chrome": "chrome", "chrome browser": "chrome",
@@ -301,8 +375,9 @@ class ToolBox:
                  browser: Callable[[str], None] | None = None,
                  runner: Callable[[list[str]], str] | None = None,
                  opener: Callable[[str], None] | None = None,
-                 edge=None, desktop=None, system=None):
+                 edge=None, desktop=None, system=None, gate: Gate | None = None, vision=None):
         self.settings = settings
+        self.gate = gate or Gate.permissive()   # the choke point for clicks/keys; the server passes its strict one
         self.reminders = reminders
         self.summarize = summarize
         # Side effects are injectable so tests never open real windows or run commands.
@@ -311,16 +386,31 @@ class ToolBox:
         self.run = runner or self._run_command
         self.open_path = opener or os.startfile
         self.edge = edge                     # EdgeController for JARVIS's own Edge window (None = no browser control)
+        self.tv = None                       # tv.MiniTV: spidey's mini TV (the server sets it; None = not available)
         self.media_opened_at = 0.0           # when a video/music site was last opened (hands-free gets stricter)
         self.desktop = desktop               # Desktop: click/type/keys in any app (None = only inside JARVIS's Edge)
         self.system = system                 # SystemControls: volume and screen brightness (None = not available)
         self.edge_used_at = 0.0              # when JARVIS last acted in its Edge window …
         self.app_hint: tuple[str, float] | None = None   # … or last opened an app ("open valorant and click play")
         self.spotify_app_at = 0.0            # when a search was opened in the Spotify desktop app
+        self._vision = vision                # vision.Vision, made on the first look (nothing loads at idle)
+        self.looking: tuple[str, float] | None = None    # (window, until): the "looking at …" pill, 3 s after each read
+        self.looked: deque = deque(maxlen=5)             # (time, window, method): names only, for "what did you look at"
+        self._screen_more: tuple[str, int, float] | None = None   # (text, position, until) for "keep reading"; memory only
+        self._page_more: tuple[str, int, float, int] | None = None   # JARVIS's Edge page: (text, position, until, offset read)
+        # what "find / list …" showed: (window, title, program, matches, when). Valid for 30 s, and only if nothing changed.
+        self.last_candidates: tuple | None = None
+        self.last_find: tuple[str, int, int, float] | None = None   # (word, shown match, matches, when): "next one" for 2 min
+        self._minimized: tuple[int, float] | None = None            # what "minimise this" last put away, for "restore it"
         self.tools: dict[str, Tool] = {t.name: t for t in self._build()}
 
+    # Reading the screen and the new access tools are started only by the person's own words: the model is never offered them.
+    NO_LLM_TOOLS = {"screen_read", "set_screen_reading", "screen_history", "screen_find", "screen_pick", "window_control",
+                    "browser_tabs", "browser_find", "browser_page_info", "open_settings", "open_shell_folder"}
+    CANDIDATES_TTL, FIND_TTL = 30.0, 120.0
+
     def schemas(self) -> list[dict]:
-        return [t.schema() for t in self.tools.values()]
+        return [t.schema() for t in self.tools.values() if t.name not in self.NO_LLM_TOOLS]
 
     def call(self, name: str, args: dict) -> ToolResult:
         tool = self.tools.get(name)
@@ -332,6 +422,13 @@ class ToolBox:
             # Browser errors are written to be spoken; anything else is a bug, and its text isn't for the user's ears.
             if isinstance(exc, BrowserError) and str(exc):
                 return ToolResult(str(exc))
+            from .desktop import DesktopError
+            if isinstance(exc, DesktopError) and str(exc):
+                return ToolResult(str(exc))
+            if COMError is not None and isinstance(exc, COMError):
+                return ToolResult("That app stopped responding or closed while I was working, so I stopped.")
+            if isinstance(exc, (PermissionError, OSError)):
+                return ToolResult("Windows wouldn't let me do that, the app may be running as administrator.")
             # a bug: keep the details for fixing (tool name and the error only, never the arguments you gave)
             import logging
             logging.getLogger("jarvis.tools").exception("tool %s failed", name)
@@ -378,6 +475,29 @@ class ToolBox:
             Tool("run_command", "Run one of the allowlisted system commands by its name.",
                  _obj({"name": {"type": "string", "description": "Allowlisted command name"}}, ["name"]), self._command),
             Tool("summarize_conversation", "Summarize this conversation so far.", _obj({}), self._summary),
+            Tool("screen_read", "Read the current window on this laptop, only when the person asks.",
+                 _obj({"mode": {"type": "string"}, "app": {"type": "string"}}), self._screen_read),
+            Tool("set_screen_reading", "Turn looking at the screen off or on.", _obj({"on": {"type": "boolean"}}),
+                 self._set_screen_reading),
+            Tool("screen_history", "Which windows were read lately (names only).", _obj({}), self._screen_history),
+            Tool("screen_find", "List or find the buttons, links and boxes in the current window and show where.",
+                 _obj({"kind": {"type": "string"}, "query": {"type": "string"}, "app": {"type": "string"},
+                       "peek": {"type": "boolean"}}), self._screen_find),
+            Tool("screen_pick", "Click one of the matches just listed, by its number.", _obj({"n": {"type": "integer"}}, ["n"]),
+                 self._screen_pick),
+            Tool("window_control", "Switch to, minimise, maximise, restore, snap or close a window; show the desktop.",
+                 _obj({"verb": {"type": "string"}, "app": {"type": "string"}}, ["verb"]), self._window_control),
+            Tool("browser_tabs", "List, switch or close tabs in JARVIS's Edge.",
+                 _obj({"action": {"type": "string"}, "which": {"type": "string"}}, ["action"]), self._b_tabs),
+            Tool("browser_find", "Find a word on the page in JARVIS's Edge and show it.",
+                 _obj({"term": {"type": "string"}, "step": {"type": "integer"}, "count_only": {"type": "boolean"}}),
+                 self._b_find),
+            Tool("browser_page_info", "The title or address of the page in JARVIS's Edge.",
+                 _obj({"what": {"type": "string"}}, ["what"]), self._b_page_info),
+            Tool("open_settings", "Open one of a fixed list of Windows settings pages (Wi-Fi, display, sound…).",
+                 _obj({"page": {"type": "string"}, "flip": {"type": "boolean"}}, ["page"]), self._open_settings),
+            Tool("open_shell_folder", "Open the Recycle Bin or This PC.", _obj({"name": {"type": "string"}}, ["name"]),
+                 self._open_shell_folder),
         ]
 
     def _time(self, args: dict) -> ToolResult:
@@ -559,6 +679,9 @@ class ToolBox:
         hit = self.find_app(name) if name and name not in ("default", "browser") else None
         if hit and not isinstance(hit[1], Path):
             target = hit[1]
+            if not target.lower().endswith(".exe") and not _cmd_safe(url):
+                # this path goes through cmd.exe, where & | ^ < > " and %NAME% mean something: a link with those never goes in
+                raise BrowserError("That link has characters I won't hand to the command line, so I didn't open it.")
             self.launch([target, url] if target.lower().endswith(".exe") else ["cmd", "/c", "start", "", target, url])
             return hit[0].title()
         self.browse(url)
@@ -587,7 +710,10 @@ class ToolBox:
         approved = approved or bool(in_jarvis_edge and self.settings.get("edge_open_any_site", True))
 
         def go() -> ToolResult:
-            where = self._browse_in(url, browser)
+            try:
+                where = self._browse_in(url, browser)
+            except BrowserError as exc:                # a blocked site, or a link the command line must never get
+                return ToolResult(str(exc))
             return ToolResult(f"Opening {label} in {where}." if where != "your browser" else f"Opening {label}.")
         if approved:
             return go()
@@ -670,32 +796,89 @@ class ToolBox:
     def _app_name(self, hwnd: int) -> str:
         return self.desktop.describe(hwnd)
 
-    def _d_click(self, hwnd: int, target: str, nth: int, args: dict) -> ToolResult:
+    def _fingerprint(self, hwnd: int, label: str) -> tuple:
+        """What was on screen when we asked: (window, program, title, control)."""
+        return (hwnd, self.desktop.process(hwnd), self.desktop.title(hwnd)[:60], label)
+
+    def _desktop_verify(self, hwnd: int, label: str, fp: tuple, hit: dict | None = None) -> Callable[[], bool]:
+        """Run at the moment of the yes: is it still the same window and the same control? Fails closed."""
+        def verify() -> bool:
+            try:
+                if self._fingerprint(hwnd, label) != fp:
+                    return False
+                recheck = getattr(self.desktop, "recheck", None)
+                return bool(recheck(hwnd, hit)) if (recheck and hit) else True
+            except Exception:
+                return False
+        return verify
+
+    def _d_click(self, hwnd: int, target: str, nth: int, args: dict, hit: dict | None = None) -> ToolResult:
+        """Click by name, or (hit given, from a numbered pick) the control the person chose. Either way the same checks
+        apply: the window rules, the "ask first" words, the fingerprint and the re-check at the moment of the yes."""
         from .desktop import CONFIRM_WORDS, DesktopError
         try:
             self.desktop.check_allowed(hwnd)
-            hit = self.desktop.find(hwnd, target, nth, wait=3)
+            hit = hit or self.desktop.find(hwnd, target, nth, wait=3)
         except DesktopError as exc:
             return ToolResult(str(exc))
         where = self._app_name(hwnd)
         if not hit:
             return ToolResult(f"I can't see “{target}” in {where}.")
         label = hit["name"]
+        many = int(hit.get("count") or 1) if not args.get("picked") else 1
+        more = (f" I found {many} matches and clicked the best one; say “find the {clean_label(target, 40)}” to see them all."
+                if many > 1 else "")
 
-        def go() -> ToolResult:
+        def go(confirmed: bool) -> ToolResult:
             try:
-                return ToolResult(f"Clicked {self.desktop.click(hwnd, hit)} in {where}.")
+                with self.gate.scope(confirmed=confirmed):      # only a real yes lets a "ask first" click through
+                    return ToolResult(f"Clicked {self.desktop.click(hwnd, hit)} in {where}.{more}")
             except DesktopError as exc:
                 return ToolResult(str(exc))
-        low = label.lower()
-        risky = any(re.search(rf"\b{w}\b", low) for w in CONFIRM_WORDS) and hit["button"] and len(low.split()) <= 4
-        if risky or target.lower() in CONFIRM_WORDS:
+        ctype = hit.get("type") or ("Button" if hit.get("button") else "")
+        dec = self.gate.authorize(Action("click", hwnd, self.desktop.process(hwnd), self.desktop.title(hwnd), label,
+                                         ctype=ctype), dry=True)
+        if dec.verdict == "deny":
+            return ToolResult(dec.say)
+        if dec.verdict == "confirm" or target.lower() in CONFIRM_WORDS:
+            fp = self._fingerprint(hwnd, label)
             return ToolResult("Waiting for confirmation before pressing it.", True,
-                              f"That will press “{label}” in {where}. Go ahead?", go)
-        return go()
+                              f"That will press “{label}” in {where}. Go ahead?", lambda: go(True), risk="high",
+                              fingerprint=fp, verify=self._desktop_verify(hwnd, label, fp, hit))
+        return go(False)
+
+    def _d_enter(self, hwnd: int, where: str, typed: str = "") -> ToolResult:
+        """Enter in a desktop app: asked first in chat apps (it sends) and wherever the gate says it could submit."""
+        from .desktop import CHAT_APPS, DesktopError
+        proc = self.desktop.process(hwnd)
+        info = getattr(self.desktop, "focused_info", lambda h: None)(hwnd)
+        dec = self.gate.authorize(Action("key", hwnd, proc, self.desktop.title(hwnd), key="enter"), info, dry=True)
+        lead = f"Typed “{typed[:40]}” in {where}. " if typed else ""
+        if dec.verdict == "deny":
+            return ToolResult(f"{lead}I didn't press Enter. {dec.say}" if typed else dec.say)
+        chat = proc in CHAT_APPS
+
+        def go(confirmed: bool) -> ToolResult:
+            try:
+                with self.gate.scope(confirmed=confirmed):
+                    self.desktop.press(hwnd, "enter")
+            except DesktopError as exc:
+                return ToolResult(str(exc))
+            if chat:
+                return ToolResult("Sent.")
+            return ToolResult(f"Typed “{typed}” and pressed Enter in {where}." if typed else f"Pressed enter in {where}.")
+        if chat or dec.verdict == "confirm":
+            fp = self._fingerprint(hwnd, "enter")
+            ask = f"I've typed “{typed[:40]}” in {where}. Should I send it?" if chat and typed else \
+                f"Send it in {where}?" if chat else \
+                (f"I've typed “{typed[:40]}” in {where}. Press Enter?" if typed else f"Press Enter in {where}?")
+            return ToolResult("Typed; waiting for confirmation before sending." if typed else
+                              "Waiting for confirmation before sending.", True, ask, lambda: go(True), risk="high",
+                              fingerprint=fp, verify=self._desktop_verify(hwnd, "enter", fp))
+        return go(False)
 
     def _d_type(self, hwnd: int, text: str, submit: bool) -> ToolResult:
-        from .desktop import CHAT_APPS, DesktopError
+        from .desktop import DesktopError
         where = self._app_name(hwnd)
         try:
             self.desktop.type_text(hwnd, text)
@@ -703,14 +886,7 @@ class ToolBox:
             return ToolResult(str(exc))
         if not submit:
             return ToolResult(f"Typed “{text}” in {where}.")
-        if self.desktop.process(hwnd) in CHAT_APPS:
-            def go() -> ToolResult:
-                self.desktop.press(hwnd, "enter")
-                return ToolResult("Sent.")
-            return ToolResult("Typed; waiting for confirmation before sending.", True,
-                              f"I've typed “{text}” in {where}. Should I send it?", go)
-        self.desktop.press(hwnd, "enter")
-        return ToolResult(f"Typed “{text}” and pressed Enter in {where}.")
+        return self._d_enter(hwnd, where, typed=text)
 
     def _d_media(self, hwnd: int | None, action: str) -> ToolResult:
         """Media keys work for any player. Spotify's window title is the song while it plays, so that's checked."""
@@ -760,6 +936,62 @@ class ToolBox:
         return ToolResult(f"I can't tell if it's playing: I pressed play on {name} in Spotify, but the song hasn't "
                           f"started yet.")
 
+    def _edge_verify(self, host: str) -> Callable[[], bool]:
+        """At the yes: still the same site as when it was asked?"""
+        def verify() -> bool:
+            try:
+                return self.edge.current()["host"] == host
+            except Exception:
+                return False
+        return verify
+
+    # -- typing mode ("type" … "end"): not offered to the model, only reached from the person's own words --
+    def typing_target(self, app: str = "") -> tuple[int | None, str] | str:
+        """Where typing mode types: the app you named, else the app you were just using, else JARVIS's Edge.
+        (window, its name), with None for JARVIS's Edge; or a sentence saying there's nowhere to type."""
+        edge_named = normalize_name(app) in ("edge", "browser", "jarvis edge", "the page", "this page", "page")
+        if app and not edge_named:                          # a named app must really be there, never a stand-in
+            hwnd = self.desktop.find_app_window(app) if self._desktop_on() else None
+            hwnd = None if hwnd and self.desktop.is_edge(hwnd) else hwnd
+        else:
+            hwnd = None if edge_named else self._desktop_target({})[0]
+        if app and not hwnd and not edge_named:
+            return f"I can't find a {app} window. Open it, click where the text should go, and say “type” again."
+        if hwnd:
+            from .desktop import DesktopError
+            try:
+                self.desktop.check_allowed(hwnd)            # a terminal or a password manager: refused up front
+            except DesktopError as exc:
+                return str(exc)
+            return hwnd, self._app_name(hwnd)
+        if self.edge and self.edge.running():
+            return None, "my Edge window"
+        return "There's no window for me to type into. Open one, click where the text should go, and say “type”."
+
+    def dictate(self, hwnd: int | None, text: str) -> ToolResult:
+        """One piece of typing mode, typed exactly as given and never followed by Enter. If you sent it from spidey's
+        bar or the panel, the keyboard goes back there afterwards so you can carry on typing."""
+        from .desktop import DesktopError, foreground_root
+        hand_back = getattr(self.desktop, "hand_back", None)
+        back = foreground_root() if hand_back else None
+        try:
+            if hwnd is None:
+                if (err := self._need_edge()):
+                    return err
+                try:
+                    self.edge.type_text(text)
+                except BrowserError as exc:
+                    return ToolResult(str(exc))
+                return ToolResult(f"Typed “{text.strip()}”.")
+            try:
+                self.desktop.type_text(hwnd, text)
+            except DesktopError as exc:
+                return ToolResult(str(exc))
+            return ToolResult(f"Typed “{text.strip()}” in {self._app_name(hwnd)}.")
+        finally:
+            if back and back != hwnd:
+                hand_back(back)
+
     def _b_type(self, args: dict) -> ToolResult:
         hwnd, text = self._desktop_target(args, "text")
         if hwnd:
@@ -771,7 +1003,7 @@ class ToolBox:
         if not text:
             return ToolResult("What should I type?")
         try:
-            field = self.edge.type_text(text)
+            field = self.edge.type_text(text, search=True) if args.get("search") else self.edge.type_text(text)
         except BrowserError as exc:
             if self.edge.current()["host"] == "web.whatsapp.com":
                 return ToolResult("WhatsApp isn't linked in my Edge window yet, or no chat is open. Link it once: on your "
@@ -789,25 +1021,24 @@ class ToolBox:
             self.edge.press("enter")
             return ToolResult("Sent.")
         return ToolResult("Typed; waiting for confirmation before sending.", True,
-                          f"I've typed “{text}”. Should I send it{self._on_site(host)}?", go)
+                          f"I've typed “{text[:40]}”. Should I send it{self._on_site(host)}?", go,
+                          risk="high", fingerprint=("edge", host), verify=self._edge_verify(host))
 
     def _b_key(self, args: dict) -> ToolResult:
-        key = str(args.get("key", "enter")).lower()
+        key = str(args.get("key", "enter")).lower().strip()
+        if "+" in key or re.fullmatch(r"f\d{1,2}", key):
+            return self._b_combo(args, key)
         hwnd, _ = self._desktop_target(args)
         if hwnd:
-            from .desktop import CHAT_APPS, DesktopError
+            from .desktop import DesktopError
             where = self._app_name(hwnd)
-
-            def press() -> ToolResult:
-                try:
-                    self.desktop.press(hwnd, key)
-                except DesktopError as exc:
-                    return ToolResult(str(exc))
-                return ToolResult("Sent." if key == "enter" and self.desktop.process(hwnd) in CHAT_APPS else
-                                  f"Pressed {key} in {where}.")
-            if key == "enter" and self.desktop.process(hwnd) in CHAT_APPS:
-                return ToolResult("Waiting for confirmation before sending.", True, f"Send it in {where}?", press)
-            return press()
+            if key == "enter":
+                return self._d_enter(hwnd, where)
+            try:
+                self.desktop.press(hwnd, key)
+            except DesktopError as exc:
+                return ToolResult(str(exc))
+            return ToolResult(f"Pressed {key} in {where}.")
         if (err := self._need_edge()):
             return err
         host = self.edge.current()["host"]
@@ -815,12 +1046,343 @@ class ToolBox:
             def go() -> ToolResult:
                 self.edge.press("enter")
                 return ToolResult("Sent.")
-            return ToolResult("Waiting for confirmation before sending.", True, f"Send it{self._on_site(host)}?", go)
+            return ToolResult("Waiting for confirmation before sending.", True, f"Send it{self._on_site(host)}?", go,
+                              risk="high", fingerprint=("edge", host), verify=self._edge_verify(host))
         try:
             self.edge.press(key)
         except BrowserError as exc:
             return ToolResult(str(exc))
         return ToolResult(f"Pressed {key}.")
+
+    def _b_combo(self, args: dict, key: str) -> ToolResult:
+        """A keyboard shortcut ('ctrl+s') in the app you were using, or in JARVIS's Edge. Only the fixed list; the risky ones
+        (close, print, cut, clear history, alt+f4…) ask for a whole-sentence yes first and re-check the window at the yes."""
+        from .desktop import DesktopError
+        norm = normalize_combo(key)
+        if norm not in PRESSABLE_COMBOS:
+            return ToolResult(SAY_NO_COMBO + " I only press a short list of safe shortcuts, like save, copy, paste and undo.")
+        what = COMBO_SAYS.get(norm, norm)
+        hwnd, _ = self._desktop_target(args)
+        if hwnd:
+            where = self._app_name(hwnd)
+            try:
+                self.desktop.check_allowed(hwnd)
+            except DesktopError as exc:
+                return ToolResult(str(exc))
+            info = getattr(self.desktop, "focused_info", lambda h: None)(hwnd)
+            dec = self.gate.authorize(Action("combo", hwnd, self.desktop.process(hwnd), self.desktop.title(hwnd), key=norm),
+                                      info, dry=True)
+            if dec.verdict == "deny":
+                return ToolResult(dec.say)
+
+            def go(confirmed: bool) -> ToolResult:
+                try:
+                    with self.gate.scope(confirmed=confirmed):
+                        self.desktop.press_combo(hwnd, norm)
+                except DesktopError as exc:
+                    return ToolResult(str(exc))
+                tail = " If a box opened, it's waiting for you." if norm in ("ctrl+s", "ctrl+p", "ctrl+f", "ctrl+n") else ""
+                return ToolResult(f"Pressed {norm} ({what}) in {where}.{tail}")
+            if dec.verdict == "confirm" or norm in CONFIRM_COMBOS:
+                fp = self._fingerprint(hwnd, norm)
+                return ToolResult("Waiting for confirmation before pressing it.", True,
+                                  f"That will press {norm} ({what}) in {where}. Go ahead?", lambda: go(True), risk="high",
+                                  fingerprint=fp, verify=self._desktop_verify(hwnd, norm, fp))
+            return go(False)
+        if (err := self._need_edge()):
+            return err
+        if norm == "ctrl+f":
+            return ToolResult("I can't open the find bar in my Edge window from outside. Say “find” and the word, "
+                              "like “find pricing on this page”, and I'll highlight it.")
+
+        def go_edge() -> ToolResult:
+            try:
+                self.edge.press_combo(norm)
+            except BrowserError as exc:
+                return ToolResult(str(exc))
+            return ToolResult(f"Pressed {norm} ({what}) in Edge.")
+        if norm in CONFIRM_COMBOS:
+            host = self.edge.current()["host"]
+            return ToolResult("Waiting for confirmation before pressing it.", True,
+                              f"That will press {norm} ({what}) in Edge. Go ahead?", go_edge, risk="high",
+                              fingerprint=("edge", host, norm), verify=self._edge_verify(host))
+        return go_edge()
+
+    # -- finding things in a window and clicking the one you pick --
+    KIND_WORDS = {"button": "button", "link": "link", "box": "box", "field": "box", "text box": "box", "textbox": "box",
+                  "menu": "menu", "tab": "tab", "option": "option", "checkbox": "checkbox", "check box": "checkbox"}
+
+    def _say_label(self, name: str) -> str:
+        """A control's name is text from the screen: plain, 60 characters, redacted, never a command."""
+        return redact(clean_label(name, 60))
+
+    def _look_target(self, args: dict) -> tuple[int | None, ToolResult | None]:
+        """The window a find / list / pick is about: the app named, else the one you were last using."""
+        if not self._desktop_on() or not hasattr(self.desktop, "list_controls"):
+            return None, ToolResult("I can't look at other apps on this setup.")
+        if self.settings.get("screen_reading") is False:
+            return None, ToolResult(SAY_READING_OFF)
+        app = str(args.get("app") or "").strip()
+        if app:
+            if normalize_name(app) in ("edge", "browser", "jarvis edge", "the page", "this page", "page"):
+                return None, ToolResult("That's my own browser window. Say “click” and the name, like “click the first "
+                                        "video”, and I'll find it on the page.")
+            hwnd = self.desktop.find_app_window(app)
+            return (hwnd, None) if hwnd else (None, ToolResult(f"I can't see a {clean_label(app, 30)} window open."))
+        hwnd, _ = self._desktop_target({})
+        if hwnd:
+            return hwnd, None
+        if self.edge_is_current():
+            return None, ToolResult("That's my own browser window. Say “click” and the name, like “click the first "
+                                    "video”, and I'll find it on the page.")
+        return None, ToolResult("I'm not sure which window you were using. Click into it and ask me again.")
+
+    def _screen_find(self, args: dict) -> ToolResult:
+        """'what buttons are on this window', 'find the Save button', 'what would you click for save'. Shows a ring on the
+        best match. peek=True never remembers anything to click and never presses anything."""
+        from .desktop import DesktopError
+        hwnd, err = self._look_target(args)
+        if err:
+            return err
+        d = self.desktop
+        kind = str(args.get("kind") or "").lower().strip() or None
+        query = re.sub(r"\s+", " ", str(args.get("query") or "")).strip()[:80] or None
+        peek = bool(args.get("peek"))
+        name = d.describe(hwnd)
+        try:
+            hits = d.list_controls(hwnd, kind, query, limit=1 if peek else 6)
+        except DesktopError as exc:
+            self._audit_read(hwnd, name, "deny")
+            return ToolResult(str(exc))
+        self._audit_read(hwnd, name, "allow")
+        self.looking = (name, time.monotonic() + 3.0)            # the "looking at …" sign: this is a look at the window
+        noun = {"box": "box", "field": "box"}.get(kind or "", kind or "control")
+        log = f"screen_find(app={name}, n={len(hits)})"
+        if not hits:
+            self.last_candidates = None
+            what = f"“{self._say_label(query)}” {noun}" if query else f"{noun}s"
+            return ToolResult(f"I can't see any {what} in {name}.", data=True, log=log)
+        d.highlight(hwnd, hits[0])                               # a ring where the best match is; nothing is clicked
+        first = hits[0]
+        if peek:
+            return ToolResult(f"For that I'd click “{self._say_label(first['name'])}”, a {first['kind']} at the "
+                              f"{first['position']} of {name}. I haven't pressed anything.", data=True, log=log)
+        self.last_candidates = (hwnd, d.title(hwnd), d.process(hwnd), hits, time.monotonic())
+        total = int(first.get("count") or len(hits))
+        if len(hits) == 1:
+            spoken = (f"I found one: “{self._say_label(first['name'])}”, a {first['kind']} at the {first['position']} of "
+                      f"{name}. I've highlighted it. Say “click number 1” to press it.")
+        else:
+            items = "; ".join(f"{i}, “{self._say_label(h['name'])}” ({h['kind']}, {h['position']})"
+                              for i, h in enumerate(hits, 1))
+            spoken = f"I found {total if total > len(hits) else len(hits)} in {name}. {items}. The first is highlighted."
+            if total > len(hits):
+                spoken += f" That's the first {len(hits)}."
+            spoken += " Say “click number” and the one you want."
+        return ToolResult(spoken, data=True, log=log)
+
+    def candidates_fresh(self) -> bool:
+        c = self.last_candidates
+        return bool(c and time.monotonic() - c[4] <= self.CANDIDATES_TTL)
+
+    def _screen_pick(self, args: dict) -> ToolResult:
+        """'click number 3': the control from the last list, if the window and the control are still just as they were."""
+        from .desktop import DesktopError
+        cand, self.last_candidates = self.last_candidates, None   # one pick per list: the screen changes after a click
+        if not cand or time.monotonic() - cand[4] > self.CANDIDATES_TTL:
+            return ToolResult("I haven't shown you a list in the last half minute. Ask me to find or list something first.")
+        hwnd, title, proc, hits, _ = cand
+        try:
+            n = int(args.get("n"))
+        except (TypeError, ValueError):
+            return ToolResult("Which number? Say “click number” and then the number.")
+        n = len(hits) if n == -1 else n                           # "the last one"
+        if not 1 <= n <= len(hits):
+            self.last_candidates = cand
+            return ToolResult(f"I only listed {len(hits)}. Say a number from 1 to {len(hits)}.")
+        d = self.desktop
+        try:
+            same = d.process(hwnd) == proc and d.title(hwnd) == title
+        except Exception:
+            same = False
+        if not same:
+            return ToolResult("That window changed since I listed those, so I didn't click anything. Ask me again.")
+        hit = hits[n - 1]
+        recheck = getattr(d, "recheck", None)
+        try:
+            alive = bool(recheck(hwnd, hit)) if recheck else True
+        except Exception:
+            alive = False
+        if not alive:
+            return ToolResult("That one isn't there any more, so I didn't click it. Ask me to find it again.")
+        try:
+            return self._d_click(hwnd, hit["name"], 0, {"picked": True}, hit=hit)
+        except DesktopError as exc:
+            return ToolResult(str(exc))
+
+    # -- windows: switch, minimise, maximise, restore, snap, close, show the desktop --
+    def _window_control(self, args: dict) -> ToolResult:
+        from .desktop import DesktopError
+        verb = {"min": "minimize", "minimise": "minimize", "max": "maximize", "maximise": "maximize", "snap left": "snap_left",
+                "snap right": "snap_right", "desktop": "show_desktop"}.get(str(args.get("verb", "")).lower().strip(),
+                                                                         str(args.get("verb", "")).lower().strip())
+        if verb not in WINDOW_VERBS or not self._desktop_on():
+            return ToolResult("I can't do that to a window on this setup." if verb in WINDOW_VERBS else
+                              "I don't do that to a window.")
+        d = self.desktop
+        if verb == "show_desktop":
+            try:
+                d.window_action(None, verb)
+            except DesktopError as exc:
+                return ToolResult(str(exc))
+            return ToolResult(WINDOW_SAYS[verb])
+        app = str(args.get("app") or "").strip()
+        if app and normalize_name(app) not in ("it", "that", "this", "window", "this window", "that window"):
+            hwnd = d.find_app_window(app)
+            if not hwnd:
+                return ToolResult(f"I can't see a {clean_label(app, 30)} window open.")
+        elif verb == "restore" and self._minimized and time.monotonic() - self._minimized[1] < 600:
+            hwnd = self._minimized[0]
+        else:
+            hwnd, _ = self._desktop_target({})
+            if not hwnd:
+                return ToolResult("I'm not sure which window you mean. Name it, like “minimise Notepad”.")
+        try:
+            d.check_allowed(hwnd)
+        except DesktopError as exc:
+            return ToolResult(str(exc))
+        where = self._app_name(hwnd)
+
+        def go(confirmed: bool) -> ToolResult:
+            try:
+                with self.gate.scope(confirmed=confirmed):
+                    d.window_action(hwnd, verb)
+            except DesktopError as exc:
+                return ToolResult(str(exc))
+            if verb == "minimize":
+                self._minimized = (hwnd, time.monotonic())
+            if verb == "close":
+                return ToolResult(f"I asked {where} to close. If it has unsaved work it may ask you first.")
+            return ToolResult(WINDOW_SAYS[verb].format(n=where))
+        dec = self.gate.authorize(Action("window", hwnd, d.process(hwnd), d.title(hwnd), where, key=verb), dry=True)
+        if dec.verdict == "deny":
+            return ToolResult(dec.say)
+        if dec.verdict == "confirm" or verb == "close":
+            fp = self._fingerprint(hwnd, where)
+            return ToolResult("Waiting for confirmation before closing it.", True, f"Close {where}? It may ask you to save.",
+                              lambda: go(True), risk="high", fingerprint=fp, verify=self._desktop_verify(hwnd, where, fp))
+        return go(False)
+
+    # -- tabs in JARVIS's Edge --
+    def _b_tabs(self, args: dict) -> ToolResult:
+        if (err := self._need_edge()):
+            return err
+        action, which = str(args.get("action", "list")).lower(), args.get("which")
+        try:
+            if action == "list":
+                tabs = self.edge.tab_list()
+                if not tabs:
+                    return ToolResult("I don't have any tabs open.")
+                said = "; ".join(f"{t['n']}, {t['title']}" + (" (this one)" if t.get("active") else "") for t in tabs)
+                return ToolResult(f"You have {len(tabs)} tab{'s' if len(tabs) != 1 else ''}: {said}.", data=True,
+                                  log=f"browser_tabs(list, n={len(tabs)})")
+            if action == "switch":
+                title = self.edge.switch_tab(which)
+                return ToolResult(f"Switched to {title}.", data=True, log="browser_tabs(switch)")
+            if action == "close":
+                title = self.edge.close_tab(which)
+                return ToolResult(f"Closed {title}.", data=True, log="browser_tabs(close)")
+            if action == "close_others":
+                pages = self.edge.tab_list()
+                if len(pages) <= 1:
+                    return ToolResult("There's only one tab open, so there's nothing else to close.")
+                host = self.edge.current()["host"]
+                n = len(pages) - 1
+
+                def go() -> ToolResult:
+                    try:
+                        closed = self.edge.close_others()
+                    except BrowserError as exc:
+                        return ToolResult(str(exc))
+                    return ToolResult(f"Closed {closed} other tab{'s' if closed != 1 else ''}. This one stays open.")
+                return ToolResult("Waiting for confirmation before closing tabs.", True,
+                                  f"Close the other {n} tab{'s' if n != 1 else ''} and keep this one?", go, risk="high",
+                                  fingerprint=("edge", host, "close others", n), verify=self._edge_verify(host))
+        except BrowserError as exc:
+            return ToolResult(str(exc))
+        return ToolResult("I can list your tabs, switch to one, close one, or close the others.")
+
+    # -- find a word on the page --
+    def _b_find(self, args: dict) -> ToolResult:
+        """'find pricing on this page', 'how many times does X appear', 'next match'. What the page says around the match is
+        spoken as quoted data, never acted on."""
+        if (err := self._need_edge()):
+            return err
+        term = str(args.get("term") or "").strip()
+        step = int(args.get("step") or 0)
+        last = self.last_find
+        fresh = bool(last and time.monotonic() - last[3] <= self.FIND_TTL)
+        if not term:
+            if not step or not fresh:
+                return ToolResult("What should I find? Say “find” and the word, like “find pricing on this page”.")
+            term, index = last[0], last[1] + step
+        else:
+            index = 0
+        try:
+            res = self.edge.find(term, index)
+        except BrowserError as exc:
+            return ToolResult(str(exc))
+        shown, count = clean_label(term, 40), res["count"]
+        if not count:
+            self.last_find = None
+            return ToolResult(f"I can't find “{shown}” on this page.", data=True, log="browser_find(0)")
+        self.last_find = (term, res["index"], count, time.monotonic())
+        if args.get("count_only"):
+            return ToolResult(f"“{shown}” appears {count} time{'s' if count != 1 else ''} on this page.", data=True,
+                              log=f"browser_find(n={count})")
+        snippet = redact(res["snippet"])
+        head = f"Found {count} match{'es' if count != 1 else ''} for “{shown}”" if not step else \
+            f"Match {res['index'] + 1} of {count}"
+        tail = " Say “next one” for another." if count > 1 else ""
+        return ToolResult(f"{head}. It reads: “{snippet}”.{tail}" if snippet else f"{head}.{tail}", data=True,
+                          log=f"browser_find(n={count})")
+
+    def find_followup_fresh(self) -> bool:
+        return bool(self.last_find and time.monotonic() - self.last_find[3] <= self.FIND_TTL)
+
+    def _b_page_info(self, args: dict) -> ToolResult:
+        if (err := self._need_edge()):
+            return err
+        try:
+            info = self.edge.page_info()
+        except BrowserError as exc:
+            return ToolResult(str(exc))
+        if str(args.get("what", "title")) == "address":
+            return ToolResult(f"You're on {info['address']}.", data=True, log="browser_page_info(address)")
+        return ToolResult(f"The page is called “{info['title'] or 'nothing, it has no title'}”.", data=True,
+                          log="browser_page_info(title)")
+
+    # -- Windows settings pages, the Recycle Bin, This PC: fixed list, literal addresses only --
+    def _open_settings(self, args: dict) -> ToolResult:
+        key = settings_key(str(args.get("page", "")))
+        uri = SETTINGS_PAGES.get(key or "")
+        if not uri:
+            return ToolResult(f"I don't have a settings page called {clean_label(str(args.get('page', '')), 30)}. I can open "
+                              + ", ".join(SETTINGS_NAMES[k] for k in list(SETTINGS_PAGES)[:6]) + " and a few more.")
+        assert uri.startswith("ms-settings:") and not re.search(r"[\s&]", uri)
+        self.open_path(uri)
+        name = SETTINGS_NAMES[key]
+        if args.get("flip"):
+            return ToolResult(f"I can't flip it, but I opened {name} settings for you.")
+        return ToolResult(f"Opening {name} settings.")
+
+    def _open_shell_folder(self, args: dict) -> ToolResult:
+        name = re.sub(r"^(?:the|my)\s+", "", str(args.get("name", "")).lower().strip())
+        uri = SHELL_FOLDERS.get(name)
+        if not uri:
+            return ToolResult("I can open the Recycle Bin or This PC.")
+        self.open_path(uri)
+        return ToolResult(f"Opening {'the Recycle Bin' if 'recycle' in name else 'This PC'}.")
 
     def _b_click(self, args: dict) -> ToolResult:
         nth = int(args.get("nth") or 0)
@@ -859,7 +1421,8 @@ class ToolBox:
         if target.lower() in PUBLISH_WORDS or (button and words & set(PUBLISH_WORDS)) or \
                 (self._publishing(host) and button and "send" in words):
             return ToolResult("Waiting for confirmation before publishing.", True,
-                              f"That will {label.lower() or 'post'}{self._on_site(host)}. Go ahead?", go)
+                              f"That will {label.lower() or 'post'}{self._on_site(host)}. Go ahead?", go,
+                              risk="high", fingerprint=("edge", host, label), verify=self._edge_verify(host))
         return go()
 
     def _b_scroll(self, args: dict) -> ToolResult:
@@ -1026,7 +1589,165 @@ class ToolBox:
         """Title, URL and visible text of the current Edge page (the conversation summarizes it)."""
         if self._need_edge():
             return None
-        return self.edge.read()
+        page = self.edge.read()
+        text = (page or {}).get("text") or ""
+        # "keep reading" carries on through this page, a chunk at a time (kept in memory for three minutes, nowhere else)
+        self._page_more = (text, 0, time.monotonic() + 180.0, len(text)) if text else None
+        return page
+
+    def _page_chunk(self) -> ToolResult:
+        """The next piece of the page JARVIS's Edge was last asked to read, spoken as data (redacted, injections flagged)."""
+        from .untrusted import SAY_INJECTION, flag_injection
+        more = self._page_more
+        if not more or time.monotonic() > more[2]:
+            return ToolResult("There's nothing more to read. Ask me to summarize the page again if you want.")
+        text, pos, until, fetched = more
+        if pos >= len(text):
+            try:
+                nxt = (self.edge.read(fetched) or {}) if self.edge else {}
+            except BrowserError:
+                nxt = {}
+            text, pos, fetched = (nxt.get("text") or ""), 0, fetched + len(nxt.get("text") or "")
+            if not text.strip():
+                self._page_more = None
+                return ToolResult("That's the end of the page.")
+        piece, pos = self._next_chunk(text, pos)
+        self._page_more = (text, pos, until, fetched)
+        piece = redact(piece)
+        tail = " Say “keep reading” for more."
+        said = piece + tail + (" " + SAY_INJECTION if flag_injection(piece) else "")
+        return ToolResult(said, data=True, log=f"browser_read(more, chars={len(piece)})", flagged=flag_injection(piece))
+
+    # -- looking at one window, only when the person asks (text stays on this laptop; what it says is DATA) --
+    @property
+    def vision(self):
+        if self._vision is None:
+            from .vision import Vision
+            self._vision = Vision()
+        return self._vision
+
+    def looking_now(self) -> dict | None:
+        """{app, expires_in} for the 3 seconds after a read (the status pill says "looking at Notepad"), else None."""
+        left = (self.looking[1] - time.monotonic()) if self.looking else 0.0
+        return {"app": self.looking[0], "expires_in": round(left, 1)} if self.looking and left > 0 else None
+
+    def edge_is_current(self) -> bool:
+        """JARVIS's own Edge was used more recently than any other app, so "read this" means its page."""
+        if not self.edge or not self.edge_used_at:
+            return False
+        return self.edge_used_at > (getattr(self.desktop, "last_changed", 0.0) if self.desktop else 0.0)
+
+    def _audit_read(self, hwnd: int, label: str, verdict: str) -> None:
+        audit = getattr(self.gate, "audit", None)
+        if not audit:
+            return
+        try:
+            audit.record(Action("read", hwnd, self.desktop.process(hwnd), self.desktop.title(hwnd), label), Decision(verdict),
+                         verdict)                       # who and where, never what the window said
+        except Exception:
+            pass
+
+    @staticmethod
+    def _next_chunk(text: str, start: int, n: int = 600) -> tuple[str, int]:
+        end = min(len(text), start + n)
+        if end < len(text):
+            stop = max(text.rfind("\n", start, end + 120), text.rfind(". ", start, end + 120))
+            end = stop + 1 if stop > start + n // 2 else end
+        return text[start:end].strip(), end
+
+    def _screen_read(self, args: dict) -> ToolResult:
+        from .untrusted import SAY_INJECTION, flag_injection, redact
+        from .vision import VisionError
+        mode = str(args.get("mode") or "read").lower()
+        mode = mode if mode in ("read", "summary", "error", "ocr", "more") else "read"
+        if mode == "more":
+            more = self._screen_more
+            if not more or time.monotonic() > more[2] or more[1] >= len(more[0]):
+                if self._page_more and self.edge_is_current():           # the page in JARVIS's Edge, not a window
+                    return self._page_chunk()
+                return ToolResult("There's nothing more to read. Ask me what's on your screen again if you want.")
+            piece, pos = self._next_chunk(more[0], more[1])
+            self._screen_more = (more[0], pos, more[2])
+            tail = " Say “keep reading” for more." if pos < len(more[0]) else " That's all of it."
+            return ToolResult(piece + tail, data=True, log=f"screen_read(more, chars={len(piece)})")
+        if self.settings.get("screen_reading") is False:
+            return ToolResult(SAY_READING_OFF)
+        d = self.desktop
+        if not d or not hasattr(d, "read_window"):
+            return ToolResult("I can't look at other apps on this setup.")
+        app = str(args.get("app") or "").strip()
+        own_browser = ToolResult("That's my own browser window. Say “summarize this page” and I'll read the page.")
+        if app:
+            if normalize_name(app) in ("edge", "browser", "jarvis edge", "the page", "this page", "page"):
+                return own_browser
+            hwnd = d.find_app_window(app)                       # only that app: never "whatever you used last"
+            if not hwnd:
+                return ToolResult(f"I can't see a {app} window open.")
+        else:
+            hwnd = d.last_hwnd
+            if not hwnd:
+                return ToolResult("I'm not sure which window you were using. Click into it and ask me again.")
+        if d.is_edge(hwnd):
+            return own_browser
+        name = d.describe(hwnd)
+        facts = d.window_facts(hwnd) if hasattr(d, "window_facts") else None
+        why = self.gate.read_allowed(hwnd, facts)
+        self._audit_read(hwnd, name, "deny" if why else "allow")
+        if why:
+            return ToolResult(why)
+        self.looking = (name, time.monotonic() + 3.0)           # the visible "looking" sign, on every read
+        want_ocr = mode == "ocr"
+        text, method = ("" if want_ocr else d.read_window(hwnd)), "UI Automation"
+        if want_ocr or len(text.strip()) < 40:                  # little or nothing readable that way: the offline OCR
+            try:
+                found = self.vision.ocr_text(self.vision.capture_window(hwnd))
+                if len(found.strip()) > len(text.strip()):
+                    text, method = found, "OCR"
+            except VisionError as exc:
+                if not text.strip():
+                    return ToolResult(str(exc))
+        if not text.strip():
+            return ToolResult(f"I couldn't find any readable text in {name}.")
+        from .untrusted import clean
+        text = redact(clean(text))                              # invisible characters can't split a card number past the mask
+        flagged = flag_injection(text)
+        self.looked.append((time.time(), name, method))
+        chars = len(text)
+        log = f"screen_read(app={name}, chars={chars})"
+        if mode == "error":
+            hits = [ln for ln in text.splitlines() if re.search(r"error|failed|warning|cannot|exception", ln, re.I)]
+            if not hits:
+                return ToolResult(f"I don't see an error message in {name}.", log=log)
+            text = "\n".join(hits)
+        piece, pos = self._next_chunk(text, 0)
+        self._screen_more = (text, pos, time.monotonic() + 180.0) if pos < len(text) else None
+        spoken = f"In {name}: {piece}"
+        if pos < len(text):
+            spoken += " Say “keep reading” for more."
+        if method == "OCR":
+            spoken += " I read it with OCR, so small errors are possible."
+        if flagged:
+            spoken += " " + SAY_INJECTION
+        return ToolResult(spoken, data=True, log=log, payload=text[:3000], flagged=flagged)
+
+    def _set_screen_reading(self, args: dict) -> ToolResult:
+        on = bool(args.get("on", True))
+        self.settings.update({"screen_reading": on})
+        if not on:
+            self._screen_more, self.looking = None, None
+        return ToolResult("Okay, I'll read a window again when you ask." if on else
+                          "Okay, I've stopped looking at the screen. I won't read any window until you say I can.")
+
+    def _screen_history(self, args: dict) -> ToolResult:
+        if not self.looked:
+            return ToolResult("I haven't looked at any window yet.")
+        now = time.time()
+        parts = []
+        for when, app, method in list(self.looked)[-3:]:
+            mins = int((now - when) // 60)
+            ago = "just now" if mins < 1 else f"{mins} minute{'s' if mins != 1 else ''} ago"
+            parts.append(f"{app} {ago}" + (" with OCR" if method == "OCR" else ""))
+        return ToolResult("I looked at " + "; then ".join(reversed(parts)) + ". I only keep the window names, not what they said.")
 
     # -- volume & brightness --
     def _volume(self, args: dict) -> ToolResult:

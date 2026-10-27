@@ -6,6 +6,7 @@ import logging
 import math
 import os
 import re
+import threading
 import time
 import unicodedata
 from pathlib import Path
@@ -27,6 +28,16 @@ KOKORO_DEFAULT = "kokoro:am_michael"
 PIPER_FALLBACKS = ("en_GB-northern_english_male-medium", "en_GB-alan-medium")
 
 
+def shrink_after_each_run(session) -> None:
+    """ONNX keeps the scratch memory of the biggest sentence it ever spoke (Piper grew to ~520 MB process size after a
+    few long replies). Give it back after every run instead: measured 23 Oct, ~226 MB and no slower."""
+    import onnxruntime as ort
+    opts = ort.RunOptions()
+    opts.add_run_config_entry("memory.enable_memory_arena_shrinkage", "cpu:0")
+    run = session.run
+    session.run = lambda output_names, input_feed, run_options=None: run(output_names, input_feed, run_options or opts)
+
+
 class SileroVAD:
     """Streaming Silero VAD v6 (ONNX). One call per 512-sample (32 ms) frame at 16 kHz."""
 
@@ -41,6 +52,7 @@ class SileroVAD:
         opts.intra_op_num_threads = 1
         opts.inter_op_num_threads = 1
         opts.log_severity_level = 4
+        opts.enable_cpu_mem_arena = False          # a tiny model: no memory pool needed
         self.session = ort.InferenceSession(str(path), sess_options=opts, providers=["CPUExecutionProvider"])
         self.reset()
 
@@ -104,6 +116,7 @@ class SmartTurn:
         opts.inter_op_num_threads = 1
         opts.intra_op_num_threads = 2
         opts.log_severity_level = 4
+        opts.enable_cpu_mem_arena = False          # runs once per pause: no memory pool needed
         self.session = ort.InferenceSession(str(path or self.PATH), opts, providers=["CPUExecutionProvider"])
         self.features = FeatureExtractor(feature_size=80, chunk_length=8)
 
@@ -142,10 +155,27 @@ class WhisperSTT:
         return Transcript(text=text, confidence=confidence, seconds=time.perf_counter() - t0)
 
 
+class LazyWhisperSTT:
+    """WhisperSTT that loads on first use. Behind the cloud it's only a backup, and loading it costs ~160 MB of RAM
+    plus ~1.1 GB of reserved memory, so wait until it's actually needed (the first local transcript takes ~1-2 s more)."""
+
+    def __init__(self, model: str = "base.en", threads: int = 4):
+        self.model_name, self.threads = model, threads
+        self._stt: WhisperSTT | None = None
+        self._lock = threading.Lock()                       # the mic and a phone call may both need it at once
+
+    def transcribe(self, pcm16k: np.ndarray, hint: str = "") -> Transcript:
+        with self._lock:
+            if self._stt is None:
+                self._stt = WhisperSTT(self.model_name, self.threads)
+        return self._stt.transcribe(pcm16k, hint)
+
+
 class OllamaLLM:
     """Streams from the local Ollama server. Nothing leaves the machine."""
 
-    def __init__(self, url: str, model: str, keep_alive: str | int = -1, num_ctx: int = 2048):
+    # Default: unload after 10 idle minutes. Never -1 ("forever"): a crash or a test run left 2.3 GB parked in RAM.
+    def __init__(self, url: str, model: str, keep_alive: str | int = "10m", num_ctx: int = 2048):
         self.url = url.rstrip("/")
         self.model = model
         self.keep_alive = keep_alive
@@ -218,6 +248,7 @@ class PiperTTS:
             raise FileNotFoundError(f"Piper voice not found: {path}. Run install.ps1 to download voices.")
         self.voice_name = voice
         self.voice = PiperVoice.load(str(path))
+        shrink_after_each_run(self.voice.session)
         self.sample_rate = self.voice.config.sample_rate
         self._cfg_cls = SynthesisConfig
         self.set_rate(rate)
@@ -258,6 +289,7 @@ class KokoroTTS:
         opts = ort.SessionOptions()
         opts.intra_op_num_threads = threads   # 4 (the P-cores) was as fast as 6-8 on an i5-1340P
         opts.inter_op_num_threads = 1
+        # (no shrink_after_each_run here: it saved ~220 MB but made this already slow voice ~20% slower, 23 Oct)
         session = ort.InferenceSession(str(model), opts, providers=["CPUExecutionProvider"])
         self.engine = Kokoro.from_session(session, str(voices))
         if name not in self.engine.get_voices():
@@ -294,6 +326,50 @@ def make_tts(voice: str, rate: float = 1.0):
             log.warning("Kokoro TTS unavailable (%s); falling back to Piper voice %s", exc, fallback)
             return PiperTTS(fallback, rate)
     return PiperTTS(voice, rate)
+
+
+class LazyTTS:
+    """make_tts() on first use. In chat mode nothing is ever spoken, so the voice model (~60-330 MB) never loads; in
+    voice mode the server warms it in the background at start. The sample rate is known up front (from the voice's
+    small .json file), so the speaker can be opened before the model is loaded."""
+
+    def __init__(self, voice: str, rate: float = 1.0):
+        self.voice_name, self._rate = voice, rate
+        self._tts = None
+        self._lock = threading.Lock()
+        self.sample_rate = 24000 if voice.startswith("kokoro:") else _piper_rate(voice)
+
+    @property
+    def loaded(self) -> bool:
+        return self._tts is not None
+
+    def load(self):
+        with self._lock:
+            if self._tts is None:
+                self._tts = make_tts(self.voice_name, self._rate)
+        return self._tts
+
+    def set_rate(self, rate: float) -> None:
+        self._rate = rate
+        if self._tts is not None and hasattr(self._tts, "set_rate"):
+            self._tts.set_rate(rate)
+
+    def synthesize(self, text: str) -> np.ndarray:
+        tts = self.load()
+        audio = tts.synthesize(text)
+        if tts.sample_rate != self.sample_rate and len(audio):    # Kokoro fell back to Piper: match the speaker
+            n = int(len(audio) * self.sample_rate / tts.sample_rate)
+            audio = np.interp(np.arange(n) * (tts.sample_rate / self.sample_rate), np.arange(len(audio)),
+                              audio).astype(np.int16)
+        return audio
+
+
+def _piper_rate(voice: str) -> int:
+    try:
+        cfg = json.loads((MODELS_DIR / "piper" / f"{voice}.onnx.json").read_text(encoding="utf-8"))
+        return int(cfg["audio"]["sample_rate"])
+    except (OSError, ValueError, KeyError, TypeError):
+        return 22050                                       # every medium Piper voice
 
 
 def kokoro_voices() -> list[str]:

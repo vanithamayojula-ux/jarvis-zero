@@ -11,8 +11,13 @@ sys.path.insert(0, str(ROOT / "backend"))
 os.environ["JARVIS_DATA_DIR"] = tempfile.mkdtemp(prefix="jarvis-test-")
 os.environ["JARVIS_API_TOKEN"] = ""   # blank, not removed: .env must not fill the real token into tests
 os.environ["GROQ_API_KEY"] = ""   # tests never call the real cloud (and .env can't fill it back in)
+for _k in ("TAVILY_API_KEY", "BRAVE_API_KEY", "SERPER_API_KEY"):
+    os.environ[_k] = ""           # nor a real web search
 
+from jarvis import config as _config  # noqa: E402
 from jarvis.interfaces import LLMChunk, Transcript  # noqa: E402
+
+_config.DEFAULTS["insecure_no_token"] = True   # the API's empty-token mode exists for the test suite only
 
 
 class FakeLLM:
@@ -59,6 +64,15 @@ class EnergyVAD:
 
 def tone(seconds: float, amp: int = 8000) -> np.ndarray:
     return (np.sin(np.arange(int(16000 * seconds)) / 3) * amp).astype(np.int16)
+
+
+@pytest.fixture(autouse=True)
+def _clear_abort():
+    """The kill switch's abort flag is process-wide: no test may leak it into the next."""
+    from jarvis.gate import ABORT
+    ABORT.clear()
+    yield
+    ABORT.clear()
 
 
 @pytest.fixture

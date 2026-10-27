@@ -18,10 +18,16 @@ psutil==7.2.2
 # Desktop control (click / type in any app through Windows UI Automation)
 uiautomation==2.0.29
 comtypes==1.4.17
+# "What's on my screen": a one-off in-memory picture of ONE window for Windows' built-in offline OCR (never saved)
+Pillow==13.0.0
+# Optional, off by default: in-process OCR instead of the short-lived PowerShell script (set JARVIS_OCR_WINRT=1)
+# winrt-Windows.Media.Ocr, winrt-Windows.Graphics.Imaging, winrt-Windows.Storage.Streams, winrt-Windows.Foundation
 # Volume control (Windows Core Audio) and the "hey jarvis" wake word
 pycaw==20260927
 openwakeword==0.6.0
 tzdata==2025.2
+# Drag and drop onto the floating bot (files, links, text)
+tkinterdnd2==0.6.4
 # Tests
 pytest==9.1.1
 pytest-asyncio==1.4.0

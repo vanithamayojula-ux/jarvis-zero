@@ -20,11 +20,32 @@ little way, web-swings to a new spot or leaps up onto the top edge of the window
 move that window), then comes home. It dozes off when you've been away from the mouse and keyboard for 2 minutes, and
 is happy to see you when you're back. "Wander around" in the right-click menu turns the roaming off.
 
+Speech bubble: replies type themselves out as they arrive; long ones scroll with the mouse wheel; links in them open
+through JARVIS (so its site blocklist checks them); Copy copies the reply. When JARVIS asks "shall I…?", the bubble
+gets Yes / No (or the choices) as buttons.
+
+Status pill (under spidey, only when there's something to show): listening / thinking / speaking, cloud or
+on-this-laptop brain, a countdown to a timer or reminder due within the hour, and the song playing in the Spotify app
+or JARVIS's Edge, with play/pause and next (the keyboard's media keys).
+
+Drag and drop: drop a link on it (open it, or open and sum it up), a file (open it, show it in its folder, or for a
+text file sum it up; programs, scripts and shortcuts are never opened), or some text (it goes into the chat bar).
+A picture file can also be shown on the picture board.
+
+Picture board (scripts/jarvis_board.py): "show me a picture of a red panda" (from Wikipedia), "show my photo called
+goa", or "draw a rocket" puts it in a small window beside spidey, without taking the keyboard from what you're doing.
+Flip back through the last few, save a copy to Downloads, or close it ("close the picture"). Right-click → Picture board.
+
+Looks and tricks: right-click → Costume (Classic, Black suit, Miles, Iron Spider) and Tricks (shoot a web at the
+mouse, hang upside down from the top of the screen). It sometimes does these by itself, and late at night (11 pm to
+6 am) it's calmer, yawnier and dozes off sooner.
+
 Drag it anywhere (that's its new home); flick it and it slides off, bouncing off the screen edges. Double-click opens
 the JARVIS dashboard. Right-click for a menu.
 Run:  .venv\\Scripts\\pythonw.exe scripts\\bot_overlay.py      (launch.ps1 and start-jarvis.bat do this for you)
-Talks only to JARVIS on this laptop (127.0.0.1:8600): it listens for JARVIS's status and replies, and sends a message
-only when you type one into the bar. Reads data/reminders.json; never changes it.
+Talks only to JARVIS on this laptop (127.0.0.1:8600): it listens for JARVIS's status and replies, and sends something
+only when you type into the bar, press a bubble button or drop something on it. Reads data/reminders.json (never
+changes it) and the Spotify window's title.
 """
 from __future__ import annotations
 
@@ -44,7 +65,7 @@ import webbrowser
 from ctypes import wintypes
 from datetime import datetime
 from pathlib import Path
-from urllib.parse import quote
+from urllib.parse import quote, urlparse
 
 ROOT = Path(__file__).resolve().parents[1]
 sys.path.insert(0, str(ROOT / "backend"))
@@ -78,7 +99,31 @@ TONGUE = "#ff2e42"         # bright red tongue
 SPARKLE = "#fff1a8"
 ZZZ = "#bcd7ff"            # sleepy z's
 THREAD = "#e8eef8"         # the web line spidey swings from
+WEB_EDGE = "#3a4252"       # dark edge round the web it shoots, so it shows on white pages too
 CONFETTI = ["#ff4f86", "#ffd166", "#7bdff2", "#b2f7a1", "#ffffff", "#c9a7ff"]
+
+# Costumes (right-click → Costume): mask shading deep → mid → light, web lines, outline, and a mouth that shows up on it.
+COSTUMES = {
+    "classic": {"label": "Classic", "deep": DEEP, "mid": MID, "light": LIGHT, "web": WEB, "rim": RIM, "mouth": MOUTH},
+    "black": {"label": "Black suit", "deep": (4, 4, 8), "mid": (30, 32, 40), "light": (92, 96, 112), "web": (52, 54, 64),
+              "rim": (0, 0, 2), "mouth": "#e9edf5"},
+    "miles": {"label": "Miles", "deep": (4, 4, 7), "mid": (28, 28, 34), "light": (84, 84, 96), "web": (214, 20, 32),
+              "rim": (0, 0, 2), "mouth": "#e9edf5"},
+    "iron": {"label": "Iron Spider", "deep": (84, 6, 12), "mid": (176, 18, 28), "light": (255, 96, 84),
+             "web": (236, 184, 64), "rim": (40, 6, 4), "mouth": MOUTH},
+}
+
+ICON_FONT = "Segoe Fluent Icons"   # Windows 11 (Segoe MDL2 Assets on Windows 10 has the same glyphs)
+GLYPH = {"mic": "", "think": "", "speak": "", "cloud": "", "local": "",
+         "timer": "", "bell": "", "music": "", "play": "", "pause": "", "next": ""}
+GLYPH["look"] = chr(0xE7B3)                           # an eye (Segoe MDL2 "View"): JARVIS is reading a window right now
+GLYPH["type"] = chr(0xE765)                           # a keyboard: typing mode is on ("type" … "end")
+LINK_RE = re.compile(r"https?://[^\s<>\"'()\[\]{}]+")
+TEXT_FILES = {".txt", ".md", ".csv", ".log", ".json", ".py", ".html", ".htm", ".xml", ".ini", ".cfg", ".yaml", ".yml",
+              ".tex", ".rtf", ".srt"}
+# never opened from a drop (programs, scripts, shortcuts); the same list JARVIS's open_file uses
+BLOCKED_EXT = {".exe", ".bat", ".cmd", ".ps1", ".vbs", ".vbe", ".js", ".jse", ".wsf", ".msi", ".scr", ".com", ".jar",
+               ".reg", ".hta", ".cpl", ".lnk", ".url", ".psm1", ".pif"}
 
 
 def _token() -> str:
@@ -175,6 +220,163 @@ def window_rect(hwnd: int) -> tuple[int, int, int, int] | None:
         return None
 
 
+_exe_names: dict[int, str] = {}
+
+
+def _exe_name(pid: int) -> str:
+    """Program file name of a process ('spotify.exe'); cached, '' if Windows won't say."""
+    if pid not in _exe_names:
+        name = ""
+        try:
+            k = ctypes.windll.kernel32
+            k.OpenProcess.restype = ctypes.c_void_p
+            h = k.OpenProcess(0x1000, False, pid)                 # PROCESS_QUERY_LIMITED_INFORMATION
+            if h:
+                buf, n = ctypes.create_unicode_buffer(400), wintypes.DWORD(400)
+                if k.QueryFullProcessImageNameW(ctypes.c_void_p(h), 0, buf, ctypes.byref(n)):
+                    name = buf.value.rsplit("\\", 1)[-1].lower()
+                k.CloseHandle(ctypes.c_void_p(h))
+        except Exception:
+            pass
+        if len(_exe_names) > 500:
+            _exe_names.clear()
+        _exe_names[pid] = name
+    return _exe_names[pid]
+
+
+def spotify_title() -> str | None:
+    """The Spotify app's window title: 'Artist - Song' while it plays, 'Spotify Free' / 'Spotify Premium' when
+    paused; None when Spotify isn't running."""
+    titles: list[str] = []
+    try:
+        u = ctypes.windll.user32
+        proc = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+
+        def each(hwnd, _):
+            n = u.GetWindowTextLengthW(hwnd)
+            if n:
+                pid = wintypes.DWORD()
+                u.GetWindowThreadProcessId(hwnd, ctypes.byref(pid))
+                if _exe_name(pid.value) == "spotify.exe":
+                    buf = ctypes.create_unicode_buffer(n + 1)
+                    u.GetWindowTextW(hwnd, buf, n + 1)
+                    titles.append(buf.value)
+            return True
+        u.EnumWindows(proc(each), 0)
+    except Exception:
+        return None
+    song = next((t for t in titles if " - " in t), None)
+    return song or next((t for t in titles if t.startswith("Spotify")), None)
+
+
+def media_key(kind: str) -> None:
+    """Press the keyboard's play/pause or next-track key (the app playing music, e.g. Spotify, reacts)."""
+    vk = {"playpause": 0xB3, "next": 0xB0}[kind]
+    try:
+        u = ctypes.windll.user32
+        u.keybd_event(vk, 0, 1, 0)                                 # KEYEVENTF_EXTENDEDKEY
+        u.keybd_event(vk, 0, 3, 0)                                 # … | KEYEVENTF_KEYUP
+    except Exception:
+        pass
+
+
+def click_through(win: tk.Toplevel) -> None:
+    """Mouse clicks pass straight through this window to whatever is under it."""
+    try:
+        win.update_idletasks()                                     # the real top-level window exists only once shown
+        u = ctypes.windll.user32
+        u.GetAncestor.restype = ctypes.c_void_p
+        top = u.GetAncestor(ctypes.c_void_p(win.winfo_id()), 2)    # GA_ROOT
+        if top:
+            hwnd = ctypes.c_void_p(top)
+            u.SetWindowLongW(hwnd, -20, u.GetWindowLongW(hwnd, -20) | 0x20)   # GWL_EXSTYLE |= WS_EX_TRANSPARENT
+    except Exception:
+        pass
+
+
+class TargetRing:
+    """The "this is where I will click" ring: ONE reusable, borderless, outline-only window. Display only: no fill, no
+    buttons, click-through (WS_EX_TRANSPARENT), never takes the focus (WS_EX_NOACTIVATE), hidden from Alt+Tab
+    (WS_EX_TOOLWINDOW). It can only be a thin red frame, so it cannot imitate a dialog. The rectangle is checked again here
+    (jarvis.highlight.validate_highlight: four numbers, on a screen, under a maximum size, at most 2 s), the label is
+    drawn as plain canvas text (30 characters), and the process is per-monitor DPI aware so physical pixels line up."""
+
+    EX_STYLE = 0x20 | 0x08000000 | 0x80          # WS_EX_TRANSPARENT | WS_EX_NOACTIVATE | WS_EX_TOOLWINDOW
+    PAD = 3
+
+    def __init__(self, root: tk.Tk):
+        self.root, self.win, self.canvas, self.after_id, self.styled = root, None, None, None, False
+
+    def _make(self) -> None:
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.attributes("-transparentcolor", KEY)
+        win.configure(bg=KEY)
+        win.withdraw()
+        self.canvas = tk.Canvas(win, bg=KEY, highlightthickness=0, bd=0)
+        self.canvas.pack(fill="both", expand=True)
+        self.win = win
+        self._style()                 # BEFORE the first show: a window shown first and styled after has already taken the focus
+
+    def _style(self) -> None:
+        try:
+            self.win.update_idletasks()
+            u = ctypes.windll.user32
+            u.GetAncestor.restype = ctypes.c_void_p
+            top = u.GetAncestor(ctypes.c_void_p(self.win.winfo_id()), 2)
+            if top:
+                hwnd = ctypes.c_void_p(top)
+                u.SetWindowLongW(hwnd, -20, u.GetWindowLongW(hwnd, -20) | self.EX_STYLE)
+                self.styled = True
+        except Exception:
+            pass
+
+    def show(self, ev: dict) -> bool:
+        """Draw the ring for a 'highlight' event; False when the event is not acceptable (nothing is drawn)."""
+        try:
+            from jarvis.highlight import to_window_geometry, validate_highlight
+            v = validate_highlight(ev.get("rect"), ev.get("label"), ev.get("ttl"))
+            if not v:
+                return False
+            if self.win is None:
+                self._make()
+            x, y, w, h = to_window_geometry(v["rect"], 1.0)
+            p = self.PAD
+            W, H = w + 2 * p, h + 2 * p
+            self.win.geometry(f"{W}x{H}+{x - p}+{y - p}")
+            c = self.canvas
+            c.delete("all")
+            c.create_rectangle(2, 2, W - 2, H - 2, outline="#ff2e42", width=4)          # outline only: no fill at all
+            c.create_rectangle(5, 5, W - 5, H - 5, outline="#ffffff", width=1)
+            if v["label"]:
+                c.create_text(11, 11, anchor="nw", text=v["label"], fill="#000000", font=("Segoe UI", 10, "bold"))
+                c.create_text(10, 10, anchor="nw", text=v["label"], fill="#ffffff", font=("Segoe UI", 10, "bold"))
+            if not self.styled:
+                self._style()
+            self.win.deiconify()
+            if self.after_id:
+                self.root.after_cancel(self.after_id)
+            self.after_id = self.root.after(int(v["ttl"] * 1000), self.hide)
+            return True
+        except Exception:
+            return False
+
+    def hide(self) -> None:
+        self.after_id = None
+        try:
+            if self.win is not None:
+                self.win.withdraw()
+        except Exception:
+            pass
+
+
+def day_part(hour: int | None = None) -> str:
+    """'night' (11 pm to 6 am), 'morning' (6 to 12), 'afternoon' or 'evening': spidey's mood follows the clock."""
+    h = datetime.now().hour if hour is None else hour
+    return "night" if h >= 23 or h < 6 else "morning" if h < 12 else "afternoon" if h < 17 else "evening"
+
+
 def _ease(u: float) -> float:
     u = min(1.0, max(0.0, u))
     return u * u * (3 - 2 * u)   # smoothstep
@@ -207,9 +409,24 @@ class Link(threading.Thread):
         self.state, self.online, self.ws_ok = "idle", False, False
         self.token = _token()
         self.events: queue.Queue = queue.Queue()      # transcripts and send errors, handled on the Tk thread
+        self.cloud: bool | None = None                # JARVIS's brain: cloud (True), local only (False), unknown
+        self.edge_media: dict = {}                    # what JARVIS's Edge is playing: {"playing", "title"}
+        self.spotify: str | None = None               # the Spotify app's window title (see spotify_title)
+        self.io_mode = "voice"                        # JARVIS's mode: "chat" (text only) or "voice"
+        self.web = False                              # web lookups available (a search key is set)
+        self.killed = False                           # the kill switch was pressed: JARVIS acts on nothing until "resume"
+        self.kill_chord = ""                          # e.g. "ctrl+alt+backspace" (shown in the panel)
+        self.looking_app, self.looking_until = "", 0.0   # JARVIS is reading this window (the "looking at …" pill, 3 s)
+        self.screen_reading = True                    # may JARVIS read a window when asked (the menu / panel switch)
+        self.typing_where = ""                        # typing mode is on, typing into this app ("" = off)
+        self.tv_on = False                            # the mini TV window is showing (the right-click toggle)
+
+    def note_looking(self, app: str, seconds: float = 3.0) -> None:
+        self.looking_app, self.looking_until = str(app or "a window")[:30], time.monotonic() + max(0.0, min(seconds, 3.0))
 
     def run(self):
         threading.Thread(target=self._poll, daemon=True).start()
+        threading.Thread(target=self._watch, daemon=True).start()
         while True:
             try:
                 from websockets.sync.client import connect
@@ -223,7 +440,30 @@ class Link(threading.Thread):
                             self.state = ev.get("state", self.state)
                         elif kind == "hello":
                             self.state = (ev.get("status") or {}).get("state", self.state)
-                        elif kind == "transcript":
+                            self.io_mode = (ev.get("status") or {}).get("io_mode", self.io_mode)
+                            self.killed = bool((ev.get("status") or {}).get("killed"))
+                        elif kind in ("kill", "resume"):
+                            self.killed = kind == "kill"
+                            self.events.put(ev)
+                        elif kind == "kill_hotkey":
+                            self.kill_chord = str(ev.get("combo") or "")
+                            self.events.put(ev)
+                        elif kind == "typing":
+                            self.typing_where = str(ev.get("where") or "a window")[:30] if ev.get("on") else ""
+                            self.events.put(ev)
+                        elif kind == "looking":
+                            self.note_looking(ev.get("app"), float(ev.get("expires_in") or 3.0))
+                        elif kind == "highlight":
+                            self.events.put({"type": "highlight", "rect": ev.get("rect"), "label": ev.get("label"),
+                                             "ttl": ev.get("ttl")})
+                        elif kind == "io_mode":
+                            self.io_mode = ev.get("mode", self.io_mode)
+                            self.events.put(ev)
+                        elif kind in ("transcript", "confirm", "open_chat", "show_panel", "conversation", "board",
+                                      "board_close"):
+                            self.events.put(ev)
+                        elif kind == "tv":
+                            self.tv_on = bool(ev.get("on"))
                             self.events.put(ev)
             except Exception:
                 pass
@@ -242,15 +482,40 @@ class Link(threading.Thread):
                     self.online = False
             time.sleep(1.0)
 
+    def _watch(self):
+        """Every couple of seconds: cloud or local brain and Edge media (from JARVIS), and the Spotify app's title."""
+        while True:
+            self.spotify = spotify_title()
+            if self.online:
+                try:
+                    req = urllib.request.Request(f"{URL}/api/overlay", headers=self._headers())
+                    with urllib.request.urlopen(req, timeout=3) as r:
+                        info = json.loads(r.read())
+                    self.cloud, self.edge_media = bool(info.get("cloud")), info.get("media") or {}
+                    self.io_mode = info.get("io_mode", self.io_mode)
+                    self.web = bool(info.get("web"))
+                    self.killed = bool(info.get("killed", self.killed))
+                    self.kill_chord = str(info.get("kill_hotkey") or self.kill_chord)
+                    self.screen_reading = bool(info.get("screen_reading", self.screen_reading))
+                    self.typing_where = str(info.get("typing", self.typing_where) or "")[:30]
+                    tv = info.get("tv")
+                    self.tv_on = bool(tv.get("on")) if isinstance(tv, dict) else False
+                    look = info.get("looking")
+                    if isinstance(look, dict) and look.get("app"):
+                        self.note_looking(look["app"], float(look.get("expires_in") or 0.0))
+                except Exception:
+                    pass                              # an older JARVIS without /api/overlay: the pill just shows less
+            time.sleep(2.0)
+
     def _headers(self) -> dict:
         return {"x-jarvis-token": self.token} if self.token else {}
 
-    def post(self, path: str, body: dict | None = None) -> None:
+    def post(self, path: str, body: dict | None = None, method: str = "POST") -> None:
         """POST to JARVIS in the background. Errors come back as a send_error event."""
         def go():
             try:
                 req = urllib.request.Request(f"{URL}{path}", data=json.dumps(body or {}).encode(),
-                                             headers={**self._headers(), "Content-Type": "application/json"}, method="POST")
+                                             headers={**self._headers(), "Content-Type": "application/json"}, method=method)
                 urllib.request.urlopen(req, timeout=5).read()
             except Exception:
                 self.events.put({"type": "send_error"})
@@ -280,6 +545,11 @@ class Bot:
         self.c = tk.Canvas(root, width=self.w, height=self.h, bg=KEY, highlightthickness=0, bd=0)
         self.c.pack()
         self.wander = tk.BooleanVar(root, value=True)          # strolls, swings and perches on its own
+        self.costume = tk.StringVar(root, value="classic")      # right-click → Costume
+        self.rctrl = tk.BooleanVar(root, value=True)            # tap Right Ctrl on its own: open/close the chat bar
+        self.panel = None                                       # JARVIS's small panel (jarvis_panel.Panel)
+        self.board = None                                       # the picture board (jarvis_board.Board), made on first use
+        self.target_ring = TargetRing(root)                     # the "where I will click" outline (made on first use)
         self.x, self.y = self._load_pos()
         self.home = (self.x, self.y)                            # where you put it; wandering always comes back here
         root.geometry(f"{self.w}x{self.h}+{self.x}+{self.y}")
@@ -299,6 +569,9 @@ class Bot:
         except Exception as exc:
             print(f"chat shortcut unavailable: {exc!r}", flush=True)
             self.chat_hotkey = None
+        self.rctrl_tap = None
+        if self.rctrl.get():
+            self._start_rctrl()
         self.shown = True
         self.drag = None
         self.click_job = None
@@ -307,13 +580,42 @@ class Bot:
         self.c.bind("<ButtonRelease-1>", self._release)
         self.c.bind("<Double-Button-1>", self._double)
         self.menu = tk.Menu(root, tearoff=0)
-        combo = self.chat_hotkey.active if self.chat_hotkey and self.chat_hotkey.active else ""
-        self.menu.add_command(label="Chat with me" + (f"   ({combo.title().replace('+', ' + ')})" if combo else ""),
-                              command=self.open_bar)
-        self.menu.add_command(label="Show all animations", command=self.run_showcase)
-        self.menu.add_command(label="Open JARVIS", command=self.open_dashboard)
+        combo = "Right Ctrl" if self.rctrl_tap and self.rctrl_tap.active else \
+            self.chat_hotkey.active.title().replace("+", " + ") if self.chat_hotkey and self.chat_hotkey.active else ""
+        self.menu.add_command(label="Chat with me" + (f"   ({combo})" if combo else ""), command=self.open_bar)
+        self.menu.add_command(label="Open JARVIS panel", command=self.open_panel)
+        self.menu.add_command(label="Picture board", command=lambda: self.get_board().open_empty())
+        self.tv_var = tk.BooleanVar(root, value=False)
+        self.menu.add_checkbutton(label="Mini TV", variable=self.tv_var,
+                                  command=lambda: self.status.send("turn on the tv" if self.tv_var.get() else "turn off the tv"))
+        tricks = tk.Menu(self.menu, tearoff=0)
+        tricks.add_command(label="Shoot a web at the mouse", command=lambda: self.shoot_web())
+        tricks.add_command(label="Hang upside down", command=lambda: self.hang())
+        tricks.add_command(label="Barrel roll", command=lambda: self.react("spin"))
+        tricks.add_command(label="Show all animations", command=self.run_showcase)
+        self.menu.add_cascade(label="Tricks", menu=tricks)
+        self.mode_var = tk.StringVar(root, value=self.status.io_mode)
+        modes = tk.Menu(self.menu, tearoff=0)
+        modes.add_radiobutton(label="Chat: I type, JARVIS answers in text (lightest)", value="chat",
+                              variable=self.mode_var, command=lambda: self.set_mode("chat"))
+        modes.add_radiobutton(label="Voice: I talk, JARVIS talks back", value="voice",
+                              variable=self.mode_var, command=lambda: self.set_mode("voice"))
+        self.menu.add_cascade(label="Mode", menu=modes)
+        self.screen_var = tk.BooleanVar(root, value=self.status.screen_reading)
+        self.menu.add_checkbutton(label="Read a window when I ask (stays on this laptop)", variable=self.screen_var,
+                                  command=self.toggle_screen_reading)
+        self.menu.configure(postcommand=lambda: (self.mode_var.set(self.status.io_mode),
+                                                 self.screen_var.set(self.status.screen_reading),
+                                                 self.tv_var.set(self.status.tv_on)))
+        looks = tk.Menu(self.menu, tearoff=0)
+        for key, cos in COSTUMES.items():
+            looks.add_radiobutton(label=cos["label"], value=key, variable=self.costume,
+                                  command=lambda: self.set_costume(self.costume.get()))
+        self.menu.add_cascade(label="Costume", menu=looks)
+        self.menu.add_command(label="Full dashboard (browser)", command=self.open_dashboard)
         self.menu.add_command(label="Move back to the corner", command=self._reset_pos)
         self.menu.add_checkbutton(label="Wander around", variable=self.wander, command=self._wander_toggled)
+        self.menu.add_checkbutton(label="Tap Right Ctrl to chat", variable=self.rctrl, command=self._rctrl_toggled)
         self.menu.add_separator()
         self.menu.add_command(label="Close the floating bot", command=root.destroy)
         self.c.bind("<Button-3>", lambda e: self.menu.tk_popup(e.x_root, e.y_root))
@@ -321,6 +623,15 @@ class Bot:
         self.alert_text, self.alert_since = "", 0.0
         self.bubble = self.bubble_job = None
         self.bubble_left = True
+        self.bub: dict | None = None                            # what the bubble shows (text, typing progress, …)
+        self.turn_reply: list[str] = []                         # what JARVIS has said this turn (typed or spoken)
+        self.pill = None                                        # status pill under spidey
+        self.pill_sig, self.pill_next = None, 0.0
+        self.last_song, self.song_seen_at = "", -999.0
+        self.web = None                                         # the web line it shoots at the mouse
+        self.hanging = False
+        self.drop_hover = False
+        self.mood = day_part()
         self.bar = self.entry = None
         self.chat_active, self.chat_reply, self.chat_sent_at = False, [], 0.0
         self.showcase = False
@@ -338,6 +649,7 @@ class Bot:
         if test_seconds:
             root.after(int(test_seconds * 1000), self._test_done)
         self._build()
+        self.can_drop = self._setup_drop()
         self.t_start, self.frame = time.monotonic(), 0
         self.tick()
 
@@ -350,6 +662,9 @@ class Bot:
         try:
             p = json.loads(POS_FILE.read_text(encoding="utf-8"))
             self.wander.set(bool(p.get("wander", True)))
+            self.rctrl.set(bool(p.get("rctrl", True)))
+            if p.get("costume") in COSTUMES:
+                self.costume.set(p["costume"])
             x, y = int(p["x"]), int(p["y"])
             if 0 <= x < self.root.winfo_screenwidth() - 20 and 0 <= y < self.root.winfo_screenheight() - 20:
                 return x, y
@@ -360,8 +675,8 @@ class Bot:
     def _save_pos(self):
         try:
             POS_FILE.parent.mkdir(parents=True, exist_ok=True)
-            POS_FILE.write_text(json.dumps({"x": self.home[0], "y": self.home[1], "wander": self.wander.get()}),
-                                encoding="utf-8")
+            POS_FILE.write_text(json.dumps({"x": self.home[0], "y": self.home[1], "wander": self.wander.get(),
+                                            "costume": self.costume.get(), "rctrl": self.rctrl.get()}), encoding="utf-8")
         except Exception:
             pass
 
@@ -420,6 +735,8 @@ class Bot:
             if abs(e.x_root - px) > 4 or abs(e.y_root - py) > 4:
                 if not self.moved:
                     self.close_ring()
+                    if self.hanging:                              # pulled down off its web
+                        self.hanging, self.action = False, None
                 self.moved = True
             nx, ny = e.x_root - self.drag[0], e.y_root - self.drag[1]
             self.drag_dist += abs(nx - self.x) + abs(ny - self.y)
@@ -448,6 +765,9 @@ class Bot:
         self._save_pos()
         px, py = getattr(self, "press_at", (e.x_root, e.y_root))
         if abs(e.x_root - px) < 4 and abs(e.y_root - py) < 4:   # a click, not a drag
+            if self.hanging:                                     # tapped while hanging: drops back home
+                self._end_hang()
+                return
             self.react("hop", n=1)
             if self.alert_text:
                 self.dismiss()
@@ -462,12 +782,95 @@ class Bot:
         if self.click_job:
             self.root.after_cancel(self.click_job)
             self.click_job = None
-        self.open_dashboard()
+        self.open_panel()
 
     def open_dashboard(self):
-        """The dashboard, with JARVIS's secret token (it refuses requests without it)."""
+        """The full dashboard in the browser, with JARVIS's secret token (it refuses requests without it)."""
         token = self.status.token
         webbrowser.open(f"{URL}/?token={quote(token)}" if token else URL)
+
+    def open_panel(self, toggle: bool = False):
+        """JARVIS's small panel beside spidey (double-click, the ring's home button, or right-click)."""
+        if self.panel is not None and self.panel.alive:
+            self.panel.close() if toggle else self.panel.lift()
+            return
+        from jarvis_panel import Panel
+        self.close_bar()
+        if not self.shown:
+            self.root.deiconify()
+            self.shown = True
+        self.poke()
+        self.react("hop", n=1)
+        self.panel = Panel(self.root, self.status, URL, self.s, self._panel_spot, self._soon_reminders,
+                           getattr(self, "icon_font", "Segoe MDL2 Assets"))
+
+    def get_board(self):
+        """The picture board (pictures and drawings beside spidey). Made once, then shown and hidden."""
+        if self.board is None:
+            from jarvis_board import Board
+            self.board = Board(self.root, self.status, URL, self.s, self._board_spot)
+        return self.board
+
+    def _board_spot(self, w: int, h: int) -> tuple[int, int]:
+        """Beside spidey like the panel; when the panel is open, beside the panel instead, so neither covers the other."""
+        panel = self.panel if self.panel is not None and self.panel.alive else None
+        if panel is None:
+            return self._panel_spot(w, h)
+        s = self.s
+        px, py, pw, ph = panel.win.winfo_x(), panel.win.winfo_y(), panel.win.winfo_width(), panel.win.winfo_height()
+        wa = work_area(px + pw / 2, py + ph / 2) or (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        x = px - w - int(6 * s) if px - w - int(6 * s) >= wa[0] else px + pw + int(6 * s)
+        y = py + ph - h
+        return int(min(max(x, wa[0]), wa[2] - w)), int(min(max(y, wa[1]), wa[3] - h))
+
+    def _panel_spot(self, w: int, h: int) -> tuple[int, int]:
+        """Beside spidey, on the side with room, bottoms level, kept on the screen it's on."""
+        s = self.s
+        wa = work_area(self.x + self.w / 2, self.y + self.h / 2) or \
+            (0, 0, self.root.winfo_screenwidth(), self.root.winfo_screenheight())
+        x = self.x - w - int(6 * s) if self.x - w - int(6 * s) >= wa[0] else self.x + self.w + int(6 * s)
+        y = self.y + self.h - h
+        return int(min(max(x, wa[0]), wa[2] - w)), int(min(max(y, wa[1]), wa[3] - h))
+
+    def _soon_reminders(self) -> list:
+        now = datetime.now()
+        items = [(self._due(r), str(r.get("text") or "a reminder")) for r in self._read_reminders() if not r.get("done")]
+        return sorted((d, t) for d, t in items if d > now)
+
+    def _start_rctrl(self):
+        try:
+            from jarvis.hotkey import KeyTap
+            self.rctrl_tap = KeyTap(lambda: self.hotkey_q.put("chat")).start()
+            print(f"right ctrl tap: {'on' if self.rctrl_tap.active else self.rctrl_tap.error}", flush=True)
+        except Exception as exc:
+            print(f"right ctrl tap unavailable: {exc!r}", flush=True)
+            self.rctrl_tap = None
+
+    def _rctrl_toggled(self):
+        self._save_pos()
+        if self.rctrl.get() and not self.rctrl_tap:
+            self._start_rctrl()
+        elif not self.rctrl.get() and self.rctrl_tap:
+            self.rctrl_tap.stop()                      # no keyboard watching at all while it's off
+            self.rctrl_tap = None
+
+    def set_mode(self, mode: str):
+        """Right-click → Mode. JARVIS answers with an io_mode event, which updates the menu and shows a bubble."""
+        if not self.status.online:
+            self.mode_var.set(self.status.io_mode)
+            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            return
+        self.status.post("/api/settings", {"changes": {"io_mode": mode}}, method="PATCH")
+
+    def toggle_screen_reading(self):
+        """Right-click → Read a window when I ask. It sends the same words you could type, so JARVIS (not this bot)
+        changes the setting, and turning it back on goes through JARVIS like any other widening of its powers."""
+        want = self.screen_var.get()
+        if not self.status.online:
+            self.screen_var.set(self.status.screen_reading)
+            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            return
+        self.status.send("you can look at the screen again" if want else "stop looking at the screen")
 
     # ---- reminders ----
     @staticmethod
@@ -510,8 +913,11 @@ class Bot:
         self._council_tick = getattr(self, "_council_tick", 0) + 1
         if self._council_tick % 30 == 1:                  # every ~30 s is plenty
             self.check_council()
+            self.mood = day_part()
         now = datetime.now()
-        for r in self._read_reminders():
+        items = self._read_reminders()
+        self.upcoming = [r for r in items if not r.get("done") and self._due(r) > now]   # for the pill's countdown
+        for r in items:
             if r["id"] in self.seen:
                 continue
             due = self._due(r)
@@ -577,7 +983,9 @@ class Bot:
         entry = tk.Entry(b, relief="flat", bd=0, bg=BUBBLE, fg=BUBBLE_INK, insertbackground=ACCENT,
                          font=("Segoe UI", 10), highlightthickness=0)
         c.create_window(int(14 * s), bh // 2, window=entry, anchor="w", width=send_x - int(14 * s) - int(16 * s))
-        hint = c.create_text(int(16 * s), bh // 2, text="Talk to me…", anchor="w", fill=HINT, font=("Segoe UI", 10))
+        typing = self.status.typing_where
+        hint = c.create_text(int(16 * s), bh // 2, text=f"Typing into {typing}… “end” stops" if typing else "Talk to me…",
+                             anchor="w", fill=HINT, font=("Segoe UI", 10))
         c.tag_lower(hint)
         entry.bind("<Return>", lambda e: self._send())
         entry.bind("<Escape>", lambda e: self.close_bar())
@@ -609,13 +1017,24 @@ class Bot:
             self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
             self.react("shake")
             return
-        self.chat_active, self.chat_reply, self.chat_sent_at = True, [], time.monotonic()
-        self.poke()
         self.react("nod")                                       # got it
         if LOVE_WORDS.search(text):
             self.root.after(900, lambda: self.react("love"))     # "thanks spidey!" → heart eyes
+        self._ask(text)
+
+    def _ask(self, text: str, confirm: bool = False):
+        """Send something to JARVIS for you (typed, a bubble button, a dropped link) and show its reply."""
+        if not self.status.online:
+            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            self.react("shake")
+            return
+        self.chat_active, self.chat_reply, self.chat_sent_at = True, [], time.monotonic()
+        self.poke()
         self.show_bubble("…", hide_after=0)
-        self.status.send(text)
+        if confirm:
+            self.status.post(f"/api/confirm/{text}")
+        else:
+            self.status.send(text)
 
     def handle_events(self):
         while True:
@@ -623,75 +1042,315 @@ class Bot:
                 ev = self.status.events.get_nowait()
             except queue.Empty:
                 return
-            if ev.get("type") == "send_error":
+            if ev.get("type") == "highlight":                   # display only: a thin ring where JARVIS will click
+                self.target_ring.show(ev)
+                continue
+            if ev.get("type") == "board":                       # a picture or a drawing for the picture board
+                self.get_board().on_event(ev)
+                if ev.get("kind") in ("image", "drawing"):
+                    self.poke()
+                    self.react("happy" if ev.get("kind") == "drawing" else "nod")
+                continue
+            if ev.get("type") == "board_close":
+                if self.board is not None:
+                    self.board.hide()
+                continue
+            if ev.get("type") == "tv":                          # the mini TV came on (it's JARVIS's own window)
+                if ev.get("on"):
+                    self.poke()
+                    self.react("nod")
+                continue
+            panel = self.panel if self.panel is not None and self.panel.alive else None
+            if panel:
+                panel.on_event(ev)                              # the panel shows the whole conversation
+            if ev.get("type") == "show_panel":                  # launch.ps1 / the start shortcut
+                self.open_panel()
+            elif panel and ev.get("type") == "transcript" and ev.get("role") == "assistant":
+                self.chat_active = False                        # the reply is in the panel: no bubble on top
+                self.turn_reply = (self.turn_reply + [str(ev.get("text", ""))])[-12:]
+            elif ev.get("type") == "kill":                      # the kill chord: red pill until "resume"
+                self.poke()
+                self.react("shake")
+                self.show_bubble("Stopped. I won't touch anything until you say resume.", hide_after=6)
+            elif ev.get("type") == "resume":
+                self.poke()
+                self.react("nod")
+                self.show_bubble("Okay, I'm back.", hide_after=3)
+            elif ev.get("type") == "send_error":
                 self.chat_active = False
                 self.show_bubble("Hmm, that didn't reach JARVIS. Try again in a moment?", hide_after=6)
                 self.react("shake")
+            elif ev.get("type") == "open_chat":                 # talk shortcut in chat mode: type instead
+                if panel:
+                    panel.lift()
+                elif self.bar is None:
+                    self.poke()
+                    self.react("hop", n=1)
+                    self.open_bar()
+            elif ev.get("type") == "typing":                    # typing mode on/off ("type" … "end")
+                on, where = bool(ev.get("on")), str(ev.get("where") or "a window")[:30]
+                if on and not int(ev.get("count") or 0):        # just switched on (not each piece typed)
+                    if panel:
+                        panel.on_event({"type": "note", "text": f"Typing mode: everything goes into {where} until “end”"})
+                    elif self.status.io_mode == "chat" and self.bar is None:
+                        self.open_bar()                          # chat mode: type the pieces here
+                    self.poke()
+                    self.react("nod")
+                elif not on and panel:
+                    panel.on_event({"type": "note", "text": "Typing mode off"})
+                if self.bar is not None and self._hint_canvas is not None:
+                    self._hint_canvas.itemconfigure(self._hint, text=f"Typing into {where}… “end” stops" if on
+                                                    else "Talk to me…")
+            elif ev.get("type") == "io_mode":
+                self.mode_var.set(ev.get("mode", "voice"))
+                if panel:
+                    panel.on_event({"type": "note", "text": "Chat mode: answers in text, no voice" if ev.get("mode") == "chat"
+                                    else "Voice mode: JARVIS talks again"})
+                elif not self.chat_active:
+                    self.poke()
+                    self.react("nod")
+                    self.show_bubble("Chat mode: I'll answer here, quietly." if ev.get("mode") == "chat" else
+                                     "Voice mode: I'll talk out loud again.", hide_after=4)
             elif ev.get("type") == "transcript" and ev.get("role") == "assistant" and ev.get("text"):
-                # Replies to a typed message always show; with the bar open, spoken replies show too.
-                if self.chat_active or self.bar is not None:
+                self.turn_reply = (self.turn_reply + [str(ev["text"])])[-12:]
+                # Replies to a typed message always show; with the bar open, spoken replies show too. In chat mode
+                # nothing is spoken, so everything shows (reminders, summed-up files…).
+                if self.chat_active or self.bar is not None or self.status.io_mode == "chat":
                     if not self.chat_reply and not self.alert_text and not (self.action and self.action["name"] == "love"):
                         self.react("happy")                     # a reply! hearts
                     self.chat_reply.append(str(ev["text"]))
-                    reply = " ".join(self.chat_reply[-6:])
-                    self.show_bubble(reply, hide_after=max(8, min(25, len(reply) // 12)))
+                    if not self.alert_text:
+                        reply = " ".join(self.chat_reply[-12:])
+                        self.show_bubble(reply, hide_after=max(8, min(25, len(reply) // 12)), typed=True, copy=True)
             elif ev.get("type") == "transcript" and ev.get("role") == "user":
+                self.turn_reply = []
                 if not self.chat_active:
                     self.chat_reply = []      # a new spoken turn starts a fresh bubble
                     if LOVE_WORDS.search(str(ev.get("text", ""))):
                         self.react("love")    # said "thank you" out loud → heart eyes
+            elif ev.get("type") == "confirm" and not self.alert_text:
+                # JARVIS asked "shall I…?": answer with a button (typing or saying it still works too)
+                if ev.get("prompt"):
+                    names = [str(n) for n in (ev.get("choices") or [])][:4]
+                    choices = [(n, lambda n=n: self._ask(n)) for n in names] if names else \
+                        [("Yes", lambda: self._ask("yes", confirm=True)), ("No", lambda: self._ask("no", confirm=True))]
+                    said = " ".join(self.turn_reply) or str(ev["prompt"])
+                    self.poke()
+                    self.react("tilt")
+                    self.show_bubble(said, choices=choices, typed=True, copy=True)
+                elif self.bub and self.bub.get("choices") and not self.chat_active:
+                    self.hide_bubble()
 
     # ---- speech bubble ----
-    def show_bubble(self, text: str, button: str | None = None, hide_after: float = 0):
-        self.hide_bubble()
-        s = self.s
-        b = tk.Toplevel(self.root)
-        b.overrideredirect(True)
-        b.attributes("-topmost", True)
-        b.attributes("-transparentcolor", KEY)
-        b.configure(bg=KEY)
+    TYPE_CPS = 80                                               # how fast replies type themselves out (characters/s)
+
+    @staticmethod
+    def _pill_pts(x0: float, y0: float, x1: float, y1: float) -> list:
+        """A rounded pill (draw with smooth=True)."""
+        r = (y1 - y0) / 2
+        return [x0 + r, y0, x1 - r, y0, x1, y0, x1, y1, x1 - r, y1, x0 + r, y1, x0, y1, x0, y0]
+
+    def show_bubble(self, text: str, button: str | None = None, hide_after: float = 0, choices: list | None = None,
+                    typed: bool = False, copy: bool = False):
+        """Speech bubble beside spidey. typed: the text types itself out, and a longer version of the text already
+        showing carries on where it got to, so a reply streams in sentence by sentence. Long text scrolls with the
+        mouse wheel, links in it are clickable, choices are buttons [(label, fn)], copy adds a Copy button and button
+        is the reminder's 'Got it'. hide_after counts from when the typing ends, and waits while the mouse is on it."""
+        s, prev = self.s, self.bub
+        shown = len(text)
+        if typed:
+            done = prev["text"][:prev["shown"]] if prev and prev["typed"] and self.bubble is not None else ""
+            shown = len(done) if done and text.startswith(done) else 0
+        if self.bubble_job:
+            self.root.after_cancel(self.bubble_job)
+            self.bubble_job = None
+        if self.bubble is None:
+            b = tk.Toplevel(self.root)
+            b.overrideredirect(True)
+            b.attributes("-topmost", True)
+            b.attributes("-transparentcolor", KEY)
+            b.configure(bg=KEY)
+            self.bubble = b
+        else:                                                   # same window: no flicker while a reply streams in
+            b = self.bubble
+            for child in b.winfo_children():
+                child.destroy()
         alert = button is not None
         font_main = ("Segoe UI Semibold", 11) if alert else ("Segoe UI", 10)
         c = tk.Canvas(b, bg=KEY, highlightthickness=0, bd=0)
         c.pack()
-        pad = int(12 * s)
-        title = c.create_text(pad, pad, text=text, anchor="nw", width=int((190 if alert else 220) * s), font=font_main,
-                              fill=BUBBLE_INK)
-        x0, y0, x1, y1 = c.bbox(title)
-        w, h = x1 + pad, y1 + pad
-        btn = None
-        if button:
-            btn = c.create_text(pad, y1 + int(8 * s), text=button, anchor="nw", font=("Segoe UI", 9), fill=ACCENT)
-            bx0, by0, bx1, by1 = c.bbox(btn)
-            w, h = max(x1, bx1) + pad, by1 + pad
-        tail = int(10 * s)
+        pad, wrap = int(12 * s), int((190 if alert else 220) * s)
+        shape = c.create_polygon(0, 0, 0, 0, 0, 0, smooth=True, fill=BUBBLE, outline=BUBBLE_EDGE, width=2)
+        tail_poly = c.create_polygon(0, 0, 0, 0, 0, 0, fill=BUBBLE, outline=BUBBLE_EDGE, width=2)
+        tail_line = c.create_line(0, 0, 0, 0, fill=BUBBLE, width=3)
+        probe = c.create_text(0, 0, text=text, anchor="nw", width=wrap, font=font_main)
+        x0, y0, x1, y1 = c.bbox(probe)
+        c.delete(probe)
+        tw, th = max(1, x1 - x0), max(1, y1 - y0)
+        vh = min(th, int(150 * s))                              # taller than this scrolls
+        scroll = th > vh
+        # the text sits in its own little canvas so it can scroll inside the bubble
+        inner = tk.Canvas(c, width=tw, height=vh, bg=BUBBLE, highlightthickness=0, bd=0,
+                          yscrollincrement=max(1, int(6 * s)))
+        txt = inner.create_text(0, 0, text=text[:shown], anchor="nw", width=wrap, font=font_main, fill=BUBBLE_INK)
+        c.create_window(pad, pad, window=inner, anchor="nw", tags="content")
+        thumb = c.create_line(0, 0, 0, 0, fill=HINT, width=max(2, round(3 * s)), capstyle="round", state="hidden")
+        w, y = pad + tw + (int(9 * s) if scroll else 0) + pad, pad + vh
+
+        def hand(tag):                                          # pointer turns into a hand over buttons and links
+            c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
+            c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
+
+        for i, u in enumerate(list(dict.fromkeys(u.rstrip(".,;:!?") for u in LINK_RE.findall(text)))[:3]):
+            short = re.sub(r"^https?://(?:www\.)?", "", u)
+            short = short if len(short) <= 34 else short[:33] + "…"
+            item = c.create_text(pad, y + int(6 * s), text="↗ " + short, anchor="nw", font=("Segoe UI", 9, "underline"),
+                                 fill=ACCENT, tags=("content", "btn", f"link{i}"))
+            c.tag_bind(f"link{i}", "<Button-1>", lambda e, u=u: self._open_link(u))
+            hand(f"link{i}")
+            bx0, by0, bx1, by1 = c.bbox(item)
+            w, y = max(w, bx1 + pad), by1
+        if choices:                                             # answer buttons; the first one is filled in
+            x, row_y, row_h = pad, y + int(9 * s), 0
+            for i, (label, fn) in enumerate(choices):
+                tag = f"ch{i}"
+                bg = c.create_polygon(0, 0, 0, 0, 0, 0, smooth=True, fill=ACCENT if i == 0 else BUBBLE, outline=ACCENT,
+                                      width=2, tags=("content", "btn", tag))
+                t = c.create_text(0, 0, text=label, anchor="nw", font=("Segoe UI Semibold", 9),
+                                  fill=BUBBLE if i == 0 else ACCENT, tags=("content", "btn", tag))
+                tx0, ty0, tx1, ty1 = c.bbox(t)
+                bw_, bh_ = tx1 - tx0 + int(18 * s), ty1 - ty0 + int(6 * s)
+                if x > pad and x + bw_ > pad + max(tw, wrap):  # no room left on this row
+                    x, row_y = pad, row_y + bh_ + int(6 * s)
+                c.coords(t, x + int(9 * s), row_y + int(3 * s))
+                c.coords(bg, *self._pill_pts(x, row_y, x + bw_, row_y + bh_))
+                c.tag_bind(tag, "<Button-1>", lambda e, fn=fn: (self.hide_bubble(), fn()))
+                hand(tag)
+                w, x, row_h = max(w, x + bw_ + pad), x + bw_ + int(6 * s), bh_
+            y = row_y + row_h
+        foot = ([(button, self.dismiss)] if button else []) + ([("Copy", None)] if copy else [])
+        if foot:
+            x, fy = pad, y + int(8 * s)
+            for i, (label, fn) in enumerate(foot):
+                tag = f"foot{i}"
+                item = c.create_text(x, fy, text=label, anchor="nw", font=("Segoe UI", 9), fill=ACCENT if fn else HINT,
+                                     tags=("content", "btn", tag))
+                c.tag_bind(tag, "<Button-1>", (lambda e, fn=fn: fn()) if fn else
+                           (lambda e, item=item: self._copy(text, c, item)))
+                hand(tag)
+                bx0, by0, bx1, by1 = c.bbox(item)
+                x, w, y = bx1 + int(14 * s), max(w, bx1 + pad), by1
+        h, tail = y + pad, int(10 * s)
         self.bubble_left = self.x > int(260 * s)          # bubble on the left of spidey unless it sits at the far left
-        total_w = w + tail
-        c.configure(width=total_w + 2, height=h + 2)
         ox = 0 if self.bubble_left else tail                # leave room for the tail on spidey's side
         r = int(12 * s)
-        pts = [ox + r, 1, ox + w - r, 1, ox + w, 1, ox + w, r, ox + w, h - r, ox + w, h, ox + w - r, h, ox + r, h, ox, h,
-               ox, h - r, ox, r, ox, 1]
-        c.create_polygon(pts, smooth=True, fill=BUBBLE, outline=BUBBLE_EDGE, width=2)
+        c.coords(shape, ox + r, 1, ox + w - r, 1, ox + w, 1, ox + w, r, ox + w, h - r, ox + w, h, ox + w - r, h, ox + r, h,
+                 ox, h, ox, h - r, ox, r, ox, 1)
         ty = min(h * 0.55, h - tail)
         if self.bubble_left:   # little tail pointing at spidey
-            c.create_polygon(ox + w - 1, ty - tail * 0.6, ox + w + tail, ty, ox + w - 1, ty + tail * 0.6,
-                             fill=BUBBLE, outline=BUBBLE_EDGE, width=2)
-            c.create_line(ox + w - 1, ty - tail * 0.6 + 2, ox + w - 1, ty + tail * 0.6 - 2, fill=BUBBLE, width=3)
+            c.coords(tail_poly, ox + w - 1, ty - tail * 0.6, ox + w + tail, ty, ox + w - 1, ty + tail * 0.6)
+            c.coords(tail_line, ox + w - 1, ty - tail * 0.6 + 2, ox + w - 1, ty + tail * 0.6 - 2)
         else:
-            c.create_polygon(ox + 1, ty - tail * 0.6, ox - tail, ty, ox + 1, ty + tail * 0.6,
-                             fill=BUBBLE, outline=BUBBLE_EDGE, width=2)
-            c.create_line(ox + 1, ty - tail * 0.6 + 2, ox + 1, ty + tail * 0.6 - 2, fill=BUBBLE, width=3)
-        c.tag_raise(title)
-        c.move(title, ox, 0)
-        if btn:
-            c.tag_raise(btn)
-            c.move(btn, ox, 0)
-        c.bind("<Button-1>", lambda e: self.dismiss() if self.alert_text else self.hide_bubble())
-        self.bubble, self.bubble_size = b, (total_w + 2, h + 2)
+            c.coords(tail_poly, ox + 1, ty - tail * 0.6, ox - tail, ty, ox + 1, ty + tail * 0.6)
+            c.coords(tail_line, ox + 1, ty - tail * 0.6 + 2, ox + 1, ty + tail * 0.6 - 2)
+        c.move("content", ox, 0)
+        c.configure(width=w + tail + 2, height=h + 2)
+        for widget in (c, inner):
+            widget.bind("<MouseWheel>", self._bubble_wheel)
+            widget.bind("<Button-1>", self._bubble_click)
+        self.bub = {"text": text, "shown": shown, "typed": typed, "inner": inner, "txt": txt, "thumb": thumb, "c": c,
+                    "scroll": scroll, "vh": vh, "tw": tw, "pad": pad, "ox": ox, "hide_after": hide_after,
+                    "follow": True, "acc": 0.0, "choices": choices, "scheduled": False}
+        self.bubble_size = (w + tail + 2, h + 2)
         self._place_popups()
-        if hide_after:
-            self.bubble_job = self.root.after(int(hide_after * 1000), self.hide_bubble)
+        self._bubble_progress()
+
+    def _bubble_progress(self):
+        """After more text has typed itself out: keep the newest line in view, and start the hide timer once done."""
+        b = self.bub
+        inner = b["inner"]
+        box = inner.bbox(b["txt"])
+        inner.configure(scrollregion=(0, 0, b["tw"], max(b["vh"], box[3] if box else 0)))
+        if b["follow"]:
+            inner.yview_moveto(1.0)
+        self._bubble_thumb()
+        if b["shown"] >= len(b["text"]) and not b["scheduled"]:
+            b["scheduled"] = True
+            if b["hide_after"]:
+                self.bubble_job = self.root.after(int(b["hide_after"] * 1000), self._bubble_autohide)
+
+    def _type_step(self, dt: float):
+        b = self.bub
+        if not b or self.bubble is None or b["shown"] >= len(b["text"]):
+            return
+        b["acc"] += self.TYPE_CPS * dt
+        n = int(b["acc"])
+        if n:
+            b["acc"] -= n
+            b["shown"] = min(len(b["text"]), b["shown"] + n)
+            b["inner"].itemconfigure(b["txt"], text=b["text"][:b["shown"]])
+            self._bubble_progress()
+
+    def _bubble_thumb(self):
+        """The little scroll bar on the right of a long bubble."""
+        b, s = self.bub, self.s
+        if not b["scroll"]:
+            return
+        top, bot = b["inner"].yview()
+        if bot - top >= 0.999:
+            b["c"].itemconfigure(b["thumb"], state="hidden")
+            return
+        x = b["ox"] + b["pad"] + b["tw"] + round(5 * s)
+        y0 = b["pad"] + b["vh"] * top
+        b["c"].coords(b["thumb"], x, round(y0 + 2), x, round(max(y0 + 6 * s, b["pad"] + b["vh"] * bot - 2)))
+        b["c"].itemconfigure(b["thumb"], state="normal")
+
+    def _bubble_wheel(self, e):
+        b = self.bub
+        if not b or not b["scroll"]:
+            return
+        b["inner"].yview_scroll(-3 if e.delta > 0 else 3, "units")
+        b["follow"] = b["inner"].yview()[1] >= 0.999           # scrolled back up to re-read: stop following
+        self._bubble_thumb()
+
+    def _bubble_click(self, e):
+        w = e.widget
+        cur = w.find_withtag("current")
+        if cur and "btn" in w.gettags(cur[0]):
+            return                                              # a button or link handles its own click
+        b = self.bub
+        if b and b["shown"] < len(b["text"]):                   # still typing: show it all at once
+            b["shown"] = len(b["text"])
+            b["inner"].itemconfigure(b["txt"], text=b["text"])
+            self._bubble_progress()
+        elif self.alert_text:
+            self.dismiss()
+        else:
+            self.hide_bubble()
+
+    def _bubble_autohide(self):
+        self.bubble_job = None
+        if self.bubble is None:
+            return
+        px, py = self.root.winfo_pointerxy()
+        bx, by = self.bubble.winfo_rootx(), self.bubble.winfo_rooty()
+        bw, bh = self.bubble_size
+        if bx <= px < bx + bw and by <= py < by + bh:          # you're still reading it
+            self.bubble_job = self.root.after(1500, self._bubble_autohide)
+        else:
+            self.hide_bubble()
+
+    def _copy(self, text: str, c: tk.Canvas, item):
+        try:
+            self.root.clipboard_clear()
+            self.root.clipboard_append(text)
+            c.itemconfigure(item, text="Copied ✓")
+        except tk.TclError:
+            pass
+
+    def _open_link(self, url: str):
+        """Links open through JARVIS, so its site blocklist checks them first."""
+        self._ask(f"open {url}")
 
     def hide_bubble(self):
         if self.bubble_job:
@@ -700,6 +1359,7 @@ class Bot:
         if self.bubble is not None:
             self.bubble.destroy()
             self.bubble = None
+        self.bub = None
 
     def _place_popups(self):
         """Bar beside spidey's lower half, bubble beside its upper half (above the bar when the bar is open)."""
@@ -721,9 +1381,18 @@ class Bot:
         if self.ring is not None:
             W, H, C, CY = self.ring_geo[:4]
             self.ring.geometry(f"{W}x{H}+{self.x + self.cx - C}+{round(self.y + self._rest_cy()) - CY}")
+        if self.pill is not None:                                # status pill just under spidey's shadow
+            pw, ph = self.pill_size
+            px, py = self.x + self.cx - pw // 2, self.y + self.h - int(3 * s)
+            wa = work_area(self.x + self.w / 2, self.y + self.h / 2)
+            if wa and py + ph > wa[3]:                           # no room below: above its head instead
+                py = self.y + self.top - ph - int(4 * s)
+            if wa:
+                px = min(max(px, wa[0]), wa[2] - pw)
+            self.pill.geometry(f"{pw}x{ph}+{px}+{py}")
 
     # ---- quick actions: hover over spidey for a moment and four buttons pop out above its head ----
-    RING = [("talk", "Talk to JARVIS"), ("timer", "Set a timer"), ("hush", "Stop talking"), ("home", "Open dashboard")]
+    RING = [("talk", "Talk to JARVIS"), ("timer", "Set a timer"), ("hush", "Stop talking"), ("home", "Open JARVIS panel")]
     RING_ANGLES = (-165, -115, -65, -15)                        # degrees round the head, left to right
 
     def _rest_cy(self) -> float:
@@ -822,7 +1491,7 @@ class Bot:
         self.close_ring()
         self.poke()
         if kind == "home":
-            self.open_dashboard()
+            self.open_panel()
             return
         if kind == "timer":
             self.open_bar(prefill="Set a timer for ")
@@ -830,6 +1499,8 @@ class Bot:
         if not self.status.online:
             self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
             self.react("shake")
+        elif kind == "talk" and self.status.io_mode == "chat":
+            self.open_bar()                                     # chat mode: the mic stays off, so type instead
         elif kind == "talk":
             self.status.post("/api/listen/once")                # same as the talk hotkey: beep, then speak
         else:
@@ -885,6 +1556,7 @@ class Bot:
         r = self.d / 2
         W, H = max(2, round(self.dw * sx)), max(2, round(self.d * sy))
         img = tk.PhotoImage(width=W, height=H)
+        deep, mid, light, web, rim = (self.skin[k] for k in ("deep", "mid", "light", "web", "rim"))   # the costume
         lx, ly, lz = -0.45, -0.60, 0.66                       # light from the top left, towards the viewer
         n = math.sqrt(lx * lx + ly * ly + lz * lz)
         lx, ly, lz = lx / n, ly / n, lz / n
@@ -907,8 +1579,8 @@ class Bot:
                 z = math.sqrt(1 - q)
                 diff = max(0.0, x * lx + y * ly + z * lz)
                 shade = diff ** 0.8
-                col = _mixf(DEEP, MID, min(1.0, shade * 1.5))                # clear core shadow on the lower right
-                col = _mixf(col, LIGHT, max(0.0, shade - 0.6) / 0.4 * 0.55)
+                col = _mixf(deep, mid, min(1.0, shade * 1.5))                # clear core shadow on the lower right
+                col = _mixf(col, light, max(0.0, shade - 0.6) / 0.4 * 0.55)
                 bounce = max(0.0, y * 0.8 + x * 0.3) * (1 - z) * 0.9           # light bouncing up from below
                 col = _mixf(col, (150, 30, 40), min(0.35, bounce))
                 # web centred a little below the middle, between the eyes (like a nose bridge); turns with the tilt
@@ -920,15 +1592,15 @@ class Bot:
                 sag = 1 - 0.10 * abs(math.sin(6 * ang))                     # rings dip between spokes
                 ring = any(abs(dist - k * sag) < line * 0.6 for k in (0.24, 0.48, 0.72, 0.96))
                 if (spoke or ring) and dist > 0.05:
-                    col = _mixf(col, WEB, 0.95)
+                    col = _mixf(col, web, 0.95)
                 hv = max(0.0, x * hx + y * hy + z * hz)
                 col = _mixf(col, (255, 200, 195), min(0.35, hv ** 12 * 0.5))  # soft glossy sheen
                 col = _mixf(col, (255, 255, 255), min(1.0, hv ** 90 * 1.6))    # crisp hotspot
                 edge = math.sqrt(q)
                 if edge > 0.80:                                                # darkening towards the edge
-                    col = _mixf(col, RIM, (edge - 0.80) / 0.20 * 0.55)
+                    col = _mixf(col, rim, (edge - 0.80) / 0.20 * 0.55)
                 if edge > 1 - outline:                                         # bold outline, about 1.5 px
-                    col = RIM
+                    col = rim
                 row.append("#%02x%02x%02x" % col)
             rows.append("{" + " ".join(row) + "}")
         img.put(" ".join(rows))
@@ -966,12 +1638,15 @@ class Bot:
         self.cx = round(self.w / 2)
         self.top = round(8 * s) + self.head_room               # sphere top at the highest point of the hover
         self.amp = 7 * s                                        # bigger, slower hover = more, evenly spaced 1 px steps
+        self.skin = COSTUMES.get(self.costume.get(), COSTUMES["classic"])
         self.cache: dict = {}
         self._sphere(1.0, 0.0)
-        # most-used poses last (the list is popped from the end): squashes, then tilts, then the spin frames
-        self.warm_list = [(1.0, a) for a in range(-165, 181, 15)] \
-            + [(sy / 100, a) for sy in (91, 94, 106) for a in (-9, 9)] \
-            + [(1.0, a) for a in (-12, -9, -6, -3, 3, 6, 9, 12)] + [(sy / 100, 0) for sy in range(82, 116, 3)]
+        self.warm_list = self._warm_poses()
+        try:
+            import tkinter.font as tkfont
+            self.icon_font = ICON_FONT if ICON_FONT in tkfont.families() else "Segoe MDL2 Assets"
+        except Exception:
+            self.icon_font = ICON_FONT
         self.i_thread = c.create_line(0, 0, 0, 0, fill=THREAD, width=max(1, round(1.2 * s)), state="hidden")
         self.i_shadow = c.create_oval(0, 0, 0, 0, fill=SHADOW, outline="")
         self.i_ring = c.create_oval(0, 0, 0, 0, outline=GLOW, width=max(2, round(2 * s)), state="hidden")
@@ -981,10 +1656,11 @@ class Bot:
                                          width=max(2, round(2.2 * s))) for _ in range(2)]
         self.i_lens = [c.create_polygon(0, 0, 0, 0, 0, 0, fill=LENS, outline="", smooth=True) for _ in range(2)]
         self.lens_fill = LENS
-        self.i_mouth = c.create_polygon(0, 0, 0, 0, 0, 0, fill=MOUTH, outline=MOUTH, smooth=True,
+        mouth = self.skin["mouth"]
+        self.i_mouth = c.create_polygon(0, 0, 0, 0, 0, 0, fill=mouth, outline=mouth, smooth=True,
                                         width=max(1, round(1.4 * s)), state="hidden")
         self.i_tongue = c.create_polygon(0, 0, 0, 0, 0, 0, fill=TONGUE, outline="", smooth=True, state="hidden")
-        self.i_mline = c.create_line(0, 0, 0, 0, fill=MOUTH, width=max(2, round(2.6 * s)), smooth=True,
+        self.i_mline = c.create_line(0, 0, 0, 0, fill=mouth, width=max(2, round(2.6 * s)), smooth=True,
                                      capstyle="round", state="hidden")
         self.i_dots = [c.create_oval(0, 0, 0, 0, fill=GLOW, outline="", state="hidden") for _ in range(3)]
         self.look = [0.0, 0.0]                                  # eased eye direction
@@ -1002,10 +1678,371 @@ class Bot:
         self.c.bind("<Enter>", lambda e: self._hover(True))
         self.c.bind("<Leave>", lambda e: self._hover(False))
 
+    @staticmethod
+    def _warm_poses() -> list:
+        """Poses to render ahead of time; most-used last (the list is popped from the end): squashes, then tilts, then
+        the spin frames."""
+        return [(1.0, a) for a in range(-165, 181, 15)] \
+            + [(sy / 100, a) for sy in (91, 94, 106) for a in (-9, 9)] \
+            + [(1.0, a) for a in (-12, -9, -6, -3, 3, 6, 9, 12)] + [(sy / 100, 0) for sy in range(82, 116, 3)]
+
+    # ---- costumes ----
+    def set_costume(self, key: str, announce: bool = True):
+        """Quick change: a confetti puff and it's in the new suit (poses re-render in the background)."""
+        if key not in COSTUMES:
+            return
+        self.costume.set(key)
+        self._save_pos()
+        self.skin = COSTUMES[key]
+        self.cache = {}
+        self.warm_list = self._warm_poses()
+        self.c.itemconfigure(self.i_sphere, image=self._sphere(1.0, 0.0))
+        self.c.itemconfigure(self.i_mouth, fill=self.skin["mouth"], outline=self.skin["mouth"])
+        self.c.itemconfigure(self.i_mline, fill=self.skin["mouth"])
+        if announce:
+            self.poke()
+            self.react("happy")
+            for i in range(10):
+                self.root.after(i * 30, lambda: self.spawn("confetti"))
+            if not self.alert_text and not self.showcase:
+                self.show_bubble(f"{self.skin['label']}!", hide_after=2)
+
+    # ---- status pill: what JARVIS is doing, cloud or local brain, the next timer, the music that's playing ----
+    def _next_due(self) -> tuple[dict, float] | None:
+        """The next reminder or timer due within the hour, and the seconds left."""
+        now, best = datetime.now(), None
+        for r in getattr(self, "upcoming", []):
+            left = (self._due(r) - now).total_seconds()
+            if 0 < left <= 3600 and (best is None or left < best[1]):
+                best = (r, left)
+        return best
+
+    def _song(self) -> tuple[str, bool] | None:
+        """(title, playing) for the Spotify app or JARVIS's Edge; a Spotify song you paused stays for 10 minutes."""
+        sp, edge, now = self.status.spotify, self.status.edge_media, time.monotonic()
+        if sp and " - " in sp:
+            self.last_song, self.song_seen_at = sp, now
+            return sp, True
+        if edge.get("playing"):
+            return (edge.get("title") or "Something in Edge"), True
+        if sp and self.last_song and now - self.song_seen_at < 600:
+            return self.last_song, False
+        return None
+
+    def _pill_items(self, state: str) -> list[tuple]:
+        """[(tag, glyph, text, colour, on_click)]; an empty list means no pill."""
+        items: list[tuple] = []
+        if self.status.killed:                               # the kill switch is on: a red "paused" pill, always first
+            items.append(("paused", "", "paused", "#d93025", lambda: self.show_bubble(
+                "Paused: I won't click or type anything. Say or type resume to let me act again.", hide_after=6)))
+        if time.monotonic() < self.status.looking_until:     # the visible sign that a window is being read, 3 s per read
+            items.append(("look", GLYPH["look"], f"looking at {self.status.looking_app}", ACCENT, lambda: self.show_bubble(
+                "I only look at one window, when you ask. Nothing is saved and nothing leaves this laptop.", hide_after=5)))
+        if self.status.typing_where:                         # typing mode: everything said or typed goes into that app
+            items.append(("typing", GLYPH["type"], f"typing into {self.status.typing_where} · end", ACCENT,
+                          lambda: self.status.send("end")))      # a click on the pill ends typing mode
+        busy = {"listening": ("mic", "Listening"), "thinking": ("think", "Thinking"),
+                "speaking": ("speak", "Speaking")}.get(state)
+        if busy:
+            items.append(("state", GLYPH[busy[0]], busy[1], ACCENT, None))
+        due = self._next_due()
+        if due:
+            r, left = due
+            m, sec = divmod(int(left), 60)
+            glyph = GLYPH["timer" if "timer" in str(r.get("text", "")).lower() else "bell"]
+            items.append(("due", glyph, f"{m}:{sec:02d}", BUBBLE_INK, lambda r=r: self._say_due(r)))
+        song = self._song()
+        if song:
+            title, playing = song
+            short = title if len(title) <= 18 else title[:17].rstrip() + "…"
+            items.append(("song", GLYPH["music"], short, BUBBLE_INK,
+                          lambda: self.show_bubble(("Playing: " if playing else "Paused: ") + title, hide_after=4)))
+            items.append(("pp", GLYPH["pause" if playing else "play"], "", ACCENT, lambda: self._media("playpause")))
+            items.append(("next", GLYPH["next"], "", ACCENT, lambda: self._media("next")))
+        if (items or self.hovered) and self.status.online and self.status.cloud is not None:
+            cloud = self.status.cloud
+            items.insert(0, ("brain", GLYPH["cloud" if cloud else "local"], "", HINT if cloud else ACCENT, lambda: self.show_bubble(
+                "Thinking in the cloud (Groq): quick replies." if cloud else
+                "The cloud is off or resting, so I'm thinking on this laptop. Replies are a bit slower.", hide_after=5)))
+        return items
+
+    def _say_due(self, r: dict):
+        due = self._due(r)
+        self.show_bubble(f"At {due:%I:%M %p}".replace(" 0", " ") + f": {str(r.get('text') or 'a reminder')}", hide_after=5)
+
+    def _media(self, kind: str):
+        media_key(kind)
+        self.poke()
+        self.react("nod")
+
+    def _update_pill(self, state: str):
+        items = self._pill_items(state) if self.shown else []
+        sig = tuple(i[:4] for i in items)
+        if sig == self.pill_sig:
+            return
+        self.pill_sig = sig
+        if not items:
+            if self.pill is not None:
+                self.pill.destroy()
+                self.pill = None
+            return
+        s = self.s
+        if self.pill is None:
+            p = tk.Toplevel(self.root)
+            p.overrideredirect(True)
+            p.attributes("-topmost", True)
+            p.attributes("-transparentcolor", KEY)
+            p.configure(bg=KEY)
+            self.pill_c = tk.Canvas(p, bg=KEY, highlightthickness=0, bd=0)
+            self.pill_c.pack()
+            self.pill = p
+        c = self.pill_c
+        c.delete("all")
+        H = int(20 * s)
+        paused = any(i[0] == "paused" for i in items)
+        bg = c.create_polygon(0, 0, 0, 0, 0, 0, smooth=True, fill=BUBBLE, outline="#d93025" if paused else BUBBLE_EDGE,
+                              width=max(1, round((3 if paused else 1.5) * s)))      # red outline while paused
+        x, mid = int(9 * s), H // 2
+        for tag, glyph, text, col, fn in items:
+            hit = c.create_rectangle(0, 0, 0, 0, fill=BUBBLE, outline="", tags=(tag,))   # the whole item is clickable
+            x0 = x
+            if glyph:
+                x = c.bbox(c.create_text(x, mid, text=glyph, anchor="w", font=(self.icon_font, 9), fill=col, tags=(tag,)))[2]
+            if text:
+                x = c.bbox(c.create_text(x + int(3 * s), mid, text=text, anchor="w", font=("Segoe UI Semibold", 8),
+                                         fill=col, tags=(tag,)))[2]
+            c.coords(hit, x0 - int(3 * s), 2, x + int(3 * s), H - 2)
+            if fn:
+                c.tag_bind(tag, "<Button-1>", lambda e, fn=fn: fn())
+                c.tag_bind(tag, "<Enter>", lambda e: c.configure(cursor="hand2"))
+                c.tag_bind(tag, "<Leave>", lambda e: c.configure(cursor=""))
+            x += int(8 * s)
+        W = x - int(8 * s) + int(9 * s)
+        c.coords(bg, *self._pill_pts(1, 1, W - 1, H - 1))
+        c.configure(width=W + 1, height=H + 1)
+        self.pill_size = (W + 1, H + 1)
+        self._place_popups()
+
+    # ---- drag and drop: a file, a link or some text dropped on spidey ----
+    def _setup_drop(self) -> bool:
+        try:
+            from tkinterdnd2 import DND_FILES, DND_TEXT, TkinterDnD
+            TkinterDnD._require(self.root)
+            self.c.drop_target_register(DND_FILES, DND_TEXT)
+            self.c.dnd_bind("<<DropEnter>>", self._drop_enter)
+            self.c.dnd_bind("<<DropPosition>>", lambda e: "copy")
+            self.c.dnd_bind("<<DropLeave>>", self._drop_leave)
+            self.c.dnd_bind("<<Drop>>", self._drop)
+            return True
+        except Exception as exc:
+            print(f"drag and drop unavailable: {exc!r}", flush=True)
+            return False
+
+    def _drop_enter(self, e):
+        self.drop_hover = True                                   # mouth open, eyes wide: gimme
+        self.poke()
+        if not self.action:
+            self.react("surprised")
+        return "copy"
+
+    def _drop_leave(self, e):
+        self.drop_hover = False
+        return "copy"
+
+    def _drop(self, e):
+        self.drop_hover = False
+        self.poke()
+        data = e.data or ""
+        try:
+            parts = list(self.root.tk.splitlist(data))
+        except tk.TclError:
+            parts = []
+        paths = [Path(p) for p in parts if p and os.path.exists(p)]
+        if paths and len(paths) == len(parts):
+            self._dropped_files(paths)
+        else:
+            text = data.strip()
+            if text.startswith("{") and text.endswith("}"):
+                text = text[1:-1].strip()
+            if LINK_RE.fullmatch(text):
+                self._dropped_link(text)
+            elif text:
+                self._dropped_text(text)
+        return "copy"
+
+    def _dropped_link(self, url: str):
+        host = re.sub(r"^www\.", "", urlparse(url).hostname or "that site")
+        self.react("nod")
+        self.show_bubble(f"A link to {host}. What should I do with it?", choices=[
+            ("Open it", lambda: self._ask(f"open {url}")),
+            ("Sum it up", lambda: self._ask(f"open {url} and summarize it")),
+            ("Never mind", lambda: None)])
+
+    def _dropped_text(self, text: str):
+        self.react("nod")
+        self.open_bar(prefill=re.sub(r"\s+", " ", text)[:500])
+        self.show_bubble("Want to ask JARVIS about this? Change it if you like, then press Enter.", hide_after=6)
+
+    def _dropped_files(self, paths: list[Path]):
+        try:
+            from jarvis.tools import BLOCKED_EXTENSIONS
+            blocked = BLOCKED_EXT | set(BLOCKED_EXTENSIONS)
+        except Exception:
+            blocked = BLOCKED_EXT
+        self.react("nod")
+        p = paths[0]
+        never = ("Never mind", lambda: None)
+        reveal = ("Show in folder", lambda: self._reveal(p))
+        if len(paths) > 1:
+            safe = [q for q in paths if q.is_dir() or q.suffix.lower() not in blocked][:5]
+            text = f"{len(paths)} things: " + ", ".join(q.name for q in paths[:3]) + ("…" if len(paths) > 3 else ".")
+            if len(safe) < len(paths):
+                text += " I won't open programs, scripts or shortcuts" + (", or more than 5 at once." if len(paths) > 5 else ".")
+            opener = ("Open them" if len(safe) == len(paths) else f"Open {len(safe)}",
+                      lambda: [self._open_path(q) for q in safe])
+            choices = ([opener] if safe else []) + [reveal, never]
+        elif p.is_dir():
+            text, choices = f"Your {p.name} folder.", [("Open it", lambda: self._open_path(p)), never]
+        elif p.suffix.lower() in blocked:
+            text = f"{p.name} is a program, script or shortcut. I don't open those. Double-click it yourself if you trust it."
+            choices = [reveal, ("OK", lambda: None)]
+        else:
+            try:
+                size = p.stat().st_size
+            except OSError:
+                size = 0
+            human = f"{size / 1e6:.1f} MB" if size >= 1e6 else f"{max(1, round(size / 1e3))} KB"
+            text = f"{p.name} ({human}). What should I do with it?"
+            choices = [("Open it", lambda: self._open_path(p))]
+            if p.suffix.lower() in (".png", ".jpg", ".jpeg", ".gif", ".bmp", ".webp") and 0 < size < 40_000_000:
+                choices.insert(0, ("Show it here", lambda: self.get_board().show_file(p)))
+            if p.suffix.lower() in TEXT_FILES and 0 < size < 2_000_000:
+                choices.append(("Sum it up", lambda: self._summarize_file(p)))
+            choices += [reveal, never]
+        self.show_bubble(text, choices=choices)
+
+    def _open_path(self, p: Path):
+        try:
+            os.startfile(str(p))                                 # opens with its usual app, like a double-click
+        except OSError:
+            self.show_bubble(f"Windows couldn't open {p.name}.", hide_after=5)
+            self.react("shake")
+
+    def _reveal(self, p: Path):
+        import subprocess
+        subprocess.Popen(f'explorer /select,"{p}"')
+
+    def _summarize_file(self, p: Path):
+        if not self.status.online:
+            self.show_bubble("I can't reach JARVIS right now. Is it running?", hide_after=6)
+            self.react("shake")
+            return
+        try:
+            text = p.read_text(encoding="utf-8", errors="replace")[:6000]
+        except OSError:
+            text = ""
+        if not text.strip():
+            self.show_bubble(f"I couldn't read anything in {p.name}.", hide_after=5)
+            return
+        self.chat_active, self.chat_reply, self.chat_sent_at = True, [], time.monotonic()
+        note = " (its text goes to the cloud brain, Groq)" if self.status.cloud else ""
+        self.show_bubble(f"Reading {p.name}…{note}", typed=True)
+        self.status.post("/api/summarize", {"name": p.name, "text": text})
+
+    # ---- tricks: shoot a web at the mouse, hang upside down from the top of the screen ----
+    def shoot_web(self, target: tuple[int, int] | None = None):
+        """Thwip! A web line shoots out to the mouse pointer, sticks there for a moment and reels back in. It's drawn
+        in its own click-through window, so it never gets in the way of a click."""
+        if self.web is not None or not self.shown or self.hanging:
+            return
+        s = self.s
+        px, py = target or self.root.winfo_pointerxy()
+        sx0, sy0 = self.x + self.cx, round(self.y + self._rest_cy())
+        if math.hypot(px - sx0, py - sy0) < self.r * 2.5:
+            return
+        m = int(14 * s)
+        x0, y0 = min(px, sx0) - m, min(py, sy0) - m
+        win = tk.Toplevel(self.root)
+        win.overrideredirect(True)
+        win.attributes("-topmost", True)
+        win.attributes("-transparentcolor", KEY)
+        win.configure(bg=KEY)
+        win.geometry(f"{abs(px - sx0) + 2 * m}x{abs(py - sy0) + 2 * m}+{x0}+{y0}")
+        c = tk.Canvas(win, width=abs(px - sx0) + 2 * m, height=abs(py - sy0) + 2 * m, bg=KEY, highlightthickness=0, bd=0)
+        c.pack()
+        click_through(win)
+        lw = max(1, round(1.4 * s))
+
+        def strand(**kw):        # a light thread with a dark edge, so it shows on white pages and dark ones alike
+            return [c.create_line(0, 0, 0, 0, fill=WEB_EDGE, width=lw + 2, capstyle="round", **kw),
+                    c.create_line(0, 0, 0, 0, fill=THREAD, width=lw, capstyle="round", **kw)]
+        self.web = {"win": win, "c": c, "line": strand(smooth=True),
+                    "splat": [strand(state="hidden") for _ in range(8)],
+                    "from": (sx0 - x0, sy0 - y0), "to": (px - x0, py - y0), "start": time.monotonic()}
+        side = 1 if px > sx0 else -1
+        self.glance, self.next_glance = (0.09 * side, 0.07 * (1 if py > sy0 else -1)), time.monotonic() - self.t0 + 1.2
+        self.poke()
+        self.react("shoot", side=side)
+
+    def _update_web(self):
+        wb = self.web
+        if not wb:
+            return
+        age, s = time.monotonic() - wb["start"], self.s
+        if age > 1.0:
+            wb["win"].destroy()
+            self.web = None
+            return
+        (fx, fy), (tx, ty) = wb["from"], wb["to"]
+        d = math.hypot(tx - fx, ty - fy) or 1
+        fx, fy = fx + (tx - fx) / d * self.r * 0.8, fy + (ty - fy) / d * self.r * 0.8     # from the edge of its head
+        k = _ease(age / 0.16) if age < 0.16 else 1.0 if age < 0.72 else 1 - _ease((age - 0.72) / 0.26)
+        ex, ey = fx + (tx - fx) * k, fy + (ty - fy) * k
+        sag = 0 if age < 0.72 else math.sin(math.pi * k) * 10 * s   # goes slack as it reels in
+        c = wb["c"]
+        for item in wb["line"]:
+            c.coords(item, round(fx), round(fy), round((fx + ex) / 2), round((fy + ey) / 2 + sag), round(ex), round(ey))
+        stuck = 0.16 <= age < 0.72
+        g = min(1.0, (age - 0.16) / 0.08) if stuck else 0
+        for i, pair in enumerate(wb["splat"]):                   # the splat where it sticks
+            a = i / len(wb["splat"]) * 2 * math.pi + 0.3
+            L = (5 + 2 * (i % 2)) * s * g
+            for item in pair:
+                if stuck:
+                    c.coords(item, round(tx), round(ty), round(tx + L * math.cos(a)), round(ty + L * math.sin(a)))
+                c.itemconfigure(item, state="normal" if stuck else "hidden")
+        if stuck:
+            for pair in wb["splat"]:                             # light strands over all the dark edges
+                c.tag_raise(pair[1])
+
+    def hang(self):
+        """Leaps up to the top of the screen and hangs there upside down on a web line for a while (a tap, a drag
+        or the time running out brings it home)."""
+        if self.hanging or self.drag or self.fling:
+            return
+        l, t, r, b = self._bounds()
+        self.perch = None
+        self.travel(min(max(self.x, l), r), t, "leap", then=self._start_hang)
+
+    def _start_hang(self):
+        self.hanging = True
+        dur = random.uniform(7, 11)
+        self.react("hang", dur=dur)
+        self.hang_job = self.root.after(int(dur * 1000), lambda: self.hanging and self._end_hang())
+
+    def _end_hang(self):
+        if getattr(self, "hang_job", None):
+            self.root.after_cancel(self.hang_job)
+            self.hang_job = None
+        self.hanging = False
+        if self.action and self.action["name"] == "hang":
+            self.action = None
+        self.travel(*self.home, style="leap")
+
     # ---- little performances ----
     DURATIONS = {"land": 0.45, "tilt": 1.7, "wiggle": 1.1, "happy": 1.6, "wake": 0.9, "surprised": 0.7, "spin": 0.9,
                  "swing": 3.2, "wink": 1.1, "shake": 0.6, "nod": 0.8, "dizzy": 2.2, "love": 2.2, "yawn": 1.8,
-                 "celebrate": 1.3, "peek": 2.4, "blep": 1.8, "lick": 1.4, "flinch": 0.7}
+                 "celebrate": 1.3, "peek": 2.4, "blep": 1.8, "lick": 1.4, "flinch": 0.7, "shoot": 1.0}
 
     def react(self, name: str, **extra):
         """Start an animation: hop, land, tilt, wiggle, happy, wake, surprised, spin, swing, wink, shake, nod,
@@ -1029,7 +2066,7 @@ class Bot:
         elif name == "celebrate":
             for i in range(14):
                 after(i * 25, lambda: self.spawn("confetti"))
-        elif name == "yawn":
+        elif name == "yawn" and not extra.get("awake"):          # a night-time yawn while you're around: stays up
             after(int(dur * 1000), lambda: setattr(self, "sleepy", True))
         elif name == "flinch":
             self.spawn("!")
@@ -1163,7 +2200,7 @@ class Bot:
         """What the current action does this frame: lift and dx in px, squash/stretch, tilt (deg), eye mode,
         eye size, blush, whether the tilt is exact (spins), a web thread, eye openness and dizzy stars."""
         out = {"lift": 0.0, "dx": 0.0, "sy": 1.0, "tilt": 0.0, "mode": "", "grow": 1.0, "blush": False,
-               "raw_tilt": False, "thread": False, "open": 1.0, "dizzy": False}
+               "raw_tilt": False, "thread": False, "open": 1.0, "dizzy": False, "hang": False}
         a, s = self.action, self.s
         if not a:
             return out
@@ -1249,6 +2286,15 @@ class Bot:
         elif name == "flinch":                                   # something came flying at it: ducks back
             k = math.sin(math.pi * min(1.0, p * 2.2)) * (1 - p)
             out.update(dx=-a.get("away", side) * 7 * s * k, sy=1 - 0.12 * k, grow=1 + 0.3 * k, tilt=-8 * a.get("away", side) * k)
+        elif name == "shoot":                                    # thwip! leans into the shot, with a little recoil
+            k = math.sin(math.pi * min(1.0, p * 4))
+            out.update(tilt=9 * side * fade, dx=-2.5 * s * side * k, sy=1 - 0.05 * k, grow=1.12)
+        elif name == "hang":                                     # upside down on a web line, swaying; flips over
+            el = t - a["start"]
+            flip = _ease(el / 0.5) * _ease((a["dur"] - el) / 0.5)
+            sway = math.sin(el * 2.1)
+            out.update(tilt=(180 + 7 * sway) * flip, raw_tilt=True, dx=3 * s * sway * flip, thread=True, hang=True,
+                       blush=False)
         elif name == "peek":                                     # looks one way, then the other, then at you
             g = (-0.10 * side) if p < 0.4 else (0.10 * side if p < 0.8 else 0.0)
             self.glance, self.next_glance = (g, -0.02 if p < 0.8 else 0.0), t + 0.5
@@ -1300,7 +2346,8 @@ class Bot:
     MOUTH_FOR = {"surprised": "o", "wake": "o", "shake": "frown", "dizzy": "wavy", "yawn": "yawn", "hop": "grin",
                  "happy": "grin", "wiggle": "grin", "celebrate": "grin", "love": "kiss", "wink": "grin", "swing": "grin",
                  "spin": "grin", "nod": "smile", "tilt": "small", "peek": "small", "land": "o", "blep": "blep",
-                 "lick": "lick", "flinch": "o", "walk": "smile", "swing_to": "grin", "leap": "grin"}
+                 "lick": "lick", "flinch": "o", "walk": "smile", "swing_to": "grin", "leap": "grin", "shoot": "grin",
+                 "hang": "grin"}
 
     def _draw_mouth(self, t: float, state: str, cx: float, cy: float, sy: float, tilt: float, mode: str, f: dict):
         """A little black mouth with a red tongue that moves with the mood: a breathing smile, a grin with a
@@ -1323,7 +2370,7 @@ class Bot:
         act = self.action
         name = act["name"] if act else ""
         p = min(1.0, max(0.0, (t - act["start"]) / act["dur"])) if act else 0.0
-        if (self.drag and self.moved) or self.fling:
+        if (self.drag and self.moved) or self.fling or self.drop_hover:
             kind = "o"
         elif state == "speaking" and not name:
             kind = "talk"
@@ -1401,8 +2448,9 @@ class Bot:
             else:
                 c.itemconfigure(item, state="hidden")
 
-    IDLE_MOVES = (["hop", "tilt", "wiggle", "happy", "look", "spin", "swing", "wink", "peek", "nod", "blep", "lick"],
-                  [3, 3, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2])
+    IDLE_MOVES = (["hop", "tilt", "wiggle", "happy", "look", "spin", "swing", "wink", "peek", "nod", "blep", "lick", "web"],
+                  [3, 3, 2, 2, 2, 2, 2, 2, 2, 1, 2, 2, 2])
+    NIGHT_MOVES = (["tilt", "look", "wink", "peek", "blep", "yawn"], [3, 3, 1, 2, 1, 2])   # late at night: calmer, yawny
 
     # ---- idle life: notices you, dozes while you're away, wanders off and comes home ----
     def _life(self, t: float, state: str):
@@ -1430,7 +2478,8 @@ class Bot:
         elif self.away_for and away < 1.5:
             self._welcome(self.away_for)
             self.away_for = 0.0
-        if state == "idle" and away >= 120 and t - self.last_yawn > 10 \
+        doze = 60 if self.mood == "night" else 120               # nods off sooner late at night
+        if state == "idle" and away >= doze and t - self.last_yawn > 10 \
                 and not (self.sleepy or self.action or self.alert_text or self.showcase):
             self.react("yawn")                                   # nobody around: a big yawn, then dozes off
             self.last_yawn = t
@@ -1469,6 +2518,9 @@ class Bot:
             return
         roll = random.random()
         if roll < 0.3 and self._try_perch(t):
+            return
+        if roll > 0.9 and self.mood != "night":                 # now and then: hangs from the top of the screen
+            self.hang()
             return
         style, reach = ("walk", random.uniform(50, 110)) if roll < 0.7 else ("swing_to", random.uniform(150, 260))
         side = random.choice((-1, 1))
@@ -1509,8 +2561,10 @@ class Bot:
             return
         self.root.after(950 if asleep else 0, lambda: self.react("happy"))
         if away >= 300 and self.bubble is None and self.bar is None:
+            hello = {"morning": "Good morning!", "evening": "Good evening!",
+                     "night": "Still up? Don't stay up too late!"}.get(self.mood) if random.random() < 0.6 else None
             self.root.after(1000 if asleep else 200, lambda: self.bubble is None and self.show_bubble(
-                random.choice(GREETINGS), hide_after=3.5))
+                hello or random.choice(GREETINGS), hide_after=3.5))
 
     def _fling_step(self):
         """Thrown: slides with momentum, rolling as it goes, bounces off the screen edges, then stops (dizzy if it
@@ -1558,13 +2612,23 @@ class Bot:
         if state == "idle" and not self.action and not self.alert_text and not self.drag and not self.sleepy \
                 and not self.showcase \
                 and t > self.next_idle:
-            pick = random.choices(*self.IDLE_MOVES)[0]
+            night = self.mood == "night"
+            pick = random.choices(*(self.NIGHT_MOVES if night else self.IDLE_MOVES))[0]
+            if pick == "web":                                    # tags the mouse pointer if it's resting nearby
+                px, py = self.ptr
+                d = math.hypot(px - (self.x + self.cx), py - (self.y + self._rest_cy()))
+                if t - self.ptr_moved_at > 1.5 and 90 * s < d < 520 * s and not self.perch:
+                    self.shoot_web()
+                else:
+                    pick = "look"
             if pick == "look":
                 self.glance = random.choice([(-0.09, 0.0), (0.09, 0.0)])
                 self.next_glance = t + 1.4
-            else:
+            elif pick == "yawn":
+                self.react("yawn", awake=True)
+            elif pick != "web":
                 self.react(pick, n=random.choice((1, 2, 3))) if pick == "hop" else self.react(pick)
-            self.next_idle = t + random.uniform(6, 12)
+            self.next_idle = t + (random.uniform(12, 22) if night else random.uniform(6, 12))
         if state == "alert" and not self.action:
             self.react("hop", n=3)                               # excited hops while a reminder is showing
         f = self._performance(t)
@@ -1574,6 +2638,8 @@ class Bot:
         if self.fling:                                           # thrown: rolls along, eyes wide
             tilt, grow_extra, mode = self.fling["roll"], 1.15, ""
             f["raw_tilt"] = True
+        if self.drop_hover:                                      # something's being dragged over it: wide-eyed
+            grow_extra, mode, lift = 1.22, "", lift + 2 * s
         if self.hovered and not mode:
             mode, blush = "happy", True
         if self.sleepy and not mode:
@@ -1588,7 +2654,7 @@ class Bot:
         tilt = self.tilt_now
         cx = self.cx + rnd(f["dx"])
         # smooth hover (slower when sleepy), plus the action's lift; one whole-pixel offset shared by every part
-        period = 5.5 if self.sleepy else 3.8
+        period = 5.5 if self.sleepy else 4.6 if self.mood == "night" else 3.8
         hover = (1 - math.cos(t * 2 * math.pi / period)) / 2   # 0 (up) … 1 (down), eased at both ends
         if self.drag and self.moved:
             hover = 0.0
@@ -1611,6 +2677,7 @@ class Bot:
         sw = self.rx * (0.62 + 0.22 * hover) * max(0.45, 1 - max(0.0, lift) / (16 * s)) * (1 / math.sqrt(sy))
         shy = self.h - rnd(6 * s)
         c.coords(self.i_shadow, rnd(cx - sw), shy - rnd(2.5 * s), rnd(cx + sw), shy + rnd(2.5 * s))
+        c.itemconfigure(self.i_shadow, state="hidden" if f["hang"] else "normal")   # no floor under it up there
         # listening / reminder ring
         if state in ("listening", "alert"):
             c.itemconfigure(self.i_ring, outline=ALERT if state == "alert" else GLOW)
@@ -1719,12 +2786,16 @@ class Bot:
             ("Heart eyes (say thanks!)", lambda: self.react("love"), 3.0),
             ("Celebrate (reminder done)", lambda: self.react("celebrate"), 2.4),
             ("Happy face when you hover over me", lambda: hover(True), 2.4),
-            ("Hover a moment: quick actions (talk, timer, stop, dashboard)",
+            ("Hover a moment: quick actions (talk, timer, stop, panel)",
              lambda: (hover(False), self.open_ring(pinned=True)), 3.4),
             ("Flinch when you swipe at me", lambda: (self.close_ring(), self.react("flinch", away=1)), 1.6),
             ("Going for a stroll", lambda: self.travel(self.x + inward * 90 * self.s, self.y, "walk"), 3.2),
             ("Web-swinging to a new spot", lambda: self.travel(self.x + inward * 170 * self.s, self.y, "swing_to"), 2.6),
             ("Leaping back home", lambda: self.travel(*self.home, style="leap"), 2.2),
+            ("Thwip! Shooting a web at your mouse",
+             lambda: self.shoot_web((round(self.x + self.cx + inward * 220 * self.s), round(self.y - 40 * self.s))), 1.8),
+            ("Hanging upside down from the top", lambda: self.hang(), 5.5),
+            ("…and dropping back home (a tap does this too)", lambda: self._end_hang(), 2.2),
             ("Happy you're back (after a break)", lambda: self._welcome(600), 3.2),
             ("Listening: wide eyes and a glow ring", lambda: (hover(False), force("listening")), 3.0),
             ("Thinking: squint and orbiting dots", lambda: force("thinking"), 3.0),
@@ -1734,8 +2805,14 @@ class Bot:
             ("Getting sleepy… big yawn", lambda: self.react("yawn"), 2.2),
             ("Sleeping, zzz", lambda: sleep_on(), 3.4),
             ("Waking up!", lambda: self.poke(), 2.0),
+            ("Costumes (right-click → Costume): Miles", lambda: self.set_costume("miles"), 2.2),
+            ("Black suit", lambda: self.set_costume("black"), 2.2),
+            ("Iron Spider", lambda: self.set_costume("iron"), 2.2),
+            ("Drop a file or a link on me and I'll open it or sum it up", lambda: (
+                self.set_costume(worn, announce=False), self.react("surprised")), 3.4),
             ("That's all! Click me to chat.", lambda: self.react("hop", n=1), 3.0),
         ]
+        worn = self.costume.get()
 
         def play(i: int):
             if i >= len(steps):
@@ -1771,12 +2848,14 @@ class Bot:
             self.next_rem_check = t + 1.0
             self.check_reminders()
         self.handle_events()
-        while not self.hotkey_q.empty():                  # the chat shortcut (Ctrl+Alt+0): open the bar, ready to type
+        while not self.hotkey_q.empty():                  # Right Ctrl tap / Ctrl+Alt+0: open the bar, ready to type
             self.hotkey_q.get_nowait()
             if not self.shown:
                 self.root.deiconify()
                 self.shown = True
-            if self.bar is not None:
+            if self.panel is not None and self.panel.alive:
+                self.panel.lift()                         # the panel is open: type there
+            elif self.bar is not None:
                 self.close_bar()
             else:
                 self.poke()
@@ -1795,15 +2874,21 @@ class Bot:
             self.shown = False
             self.hide_bubble()
             self.close_ring()
+        dt, self.last_tick = min(0.1, t - getattr(self, "last_tick", t)), t
+        state = "alert" if self.alert_text else (self.force_state or (self.status.state if self.status.online else "idle"))
+        if t >= self.pill_next:                          # the status pill changes slowly: 4 checks a second
+            self.pill_next = t + 0.25
+            self._update_pill(state)
         if self.shown:
             if self.fling:
                 self._fling_step()
-            state = "alert" if self.alert_text else (self.force_state or (self.status.state if self.status.online else "idle"))
             self.draw(t, state)
             if self.ring is None and self.hovered and self.hover_since and time.monotonic() - self.hover_since > 0.5 \
-                    and not (self.drag or self.fling or self.showcase or (self.action and "to" in self.action)):
+                    and not (self.drag or self.fling or self.showcase or self.hanging or (self.action and "to" in self.action)):
                 self.open_ring()                         # hovered a moment: quick actions pop out
             self._update_ring()
+            self._type_step(dt)
+            self._update_web()
         # schedule against the clock so frames stay evenly spaced (~60 fps)
         self.frame += 1
         delay = max(1, int((self.t_start + self.frame / 60 - time.monotonic()) * 1000))
@@ -1819,7 +2904,7 @@ def main():
     if not test and not single_instance():
         return
     try:
-        ctypes.windll.shcore.SetProcessDpiAwareness(1)
+        ctypes.windll.shcore.SetProcessDpiAwareness(2)   # per-monitor: the highlight ring gets physical screen pixels
         ctypes.windll.winmm.timeBeginPeriod(1)   # 1 ms timer so frames land evenly (Windows default is ~16 ms)
     except Exception:
         pass
@@ -1844,6 +2929,21 @@ def main():
                                                 act, then=lambda: root.after(1500, lambda: bot.travel(*bot.home, style=act))))
         elif act == "perch":
             root.after(1200, lambda: print("perch:", bot._try_perch(0), flush=True))
+        elif act == "web":
+            root.after(1200, lambda: bot.shoot_web((round(bot.x + bot.cx + inward * 240 * bot.s), round(bot.y - 80 * bot.s))))
+        elif act == "hang":
+            root.after(1200, bot.hang)
+        elif act in COSTUMES:
+            root.after(1200, lambda: bot.set_costume(act))
+        elif act == "confirm":   # JARVIS asks "shall I…?" and the bubble gets Yes / No buttons
+            root.after(1200, lambda: (bot.status.events.put({"type": "transcript", "role": "assistant", "text":
+                                      "Send “on my way” to Rahul on WhatsApp?"}),
+                                      bot.status.events.put({"type": "confirm", "prompt": "Send it?", "choices": None})))
+        elif act == "long":      # a long reply that scrolls, with a link
+            bot.chat_active, bot.chat_sent_at = True, time.monotonic() + 1
+            text =("Here's what I found. " * 3 + "The Spider-Man page is at https://en.wikipedia.org/wiki/Spider-Man "
+                    "and it has the whole history, from 1962's Amazing Fantasy #15 onwards. ") * 3
+            root.after(1200, lambda: bot.status.events.put({"type": "transcript", "role": "assistant", "text": text}))
         elif act == "fling":
             def throw():
                 bot.fling = {"vx": inward * 2600 * bot.s, "vy": -900 * bot.s, "fx": float(bot.x), "fy": float(bot.y),
@@ -1851,11 +2951,26 @@ def main():
             root.after(1200, throw)
         else:
             root.after(1200, lambda: bot.react(act, n=3))
+    drop = arg("--drop")
+    if drop:   # testing: as if this (a file path, a link or text) were dropped on spidey
+        class Fake:
+            data = drop if not os.path.exists(drop) else "{" + drop + "}"
+        root.after(1200, lambda: bot._drop(Fake()))
+    pick = arg("--pick")
+    if pick:   # testing: press bubble button number N (from 0) once the bubble is up
+        def press():
+            label, fn = bot.bub["choices"][int(pick)]
+            print("pressed:", label, flush=True)
+            bot.hide_bubble()
+            fn()
+        root.after(2600, press)
     if chat:   # testing: open the bar, type this and press Enter
         def go():
             bot.open_bar()
             root.after(500, lambda: (bot.entry.insert(0, chat), bot._send()))
         root.after(1500, go)
+    if "--panel" in sys.argv:   # started by launch.ps1 / start-jarvis.bat: show JARVIS's panel straight away
+        root.after(1200, bot.open_panel)
     root.mainloop()
 
 

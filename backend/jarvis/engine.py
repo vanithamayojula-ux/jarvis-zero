@@ -11,9 +11,10 @@ from typing import Callable
 
 import numpy as np
 
-from .audio import Microphone, Speaker
+from .audio import Microphone, NullSpeaker, Speaker
 from .config import DATA_DIR, Settings
-from .conversation import Conversation, looks_incomplete
+from .conversation import STRICT_YES, Conversation, looks_incomplete
+from .gate import ABORT
 from .interfaces import LLM, STT, TTS, VAD
 from .tools import ToolBox
 
@@ -112,6 +113,8 @@ class Engine:
         self.speaker: Speaker | None = None
         self.mic: Microphone | None = None
         self.conversation = Conversation(settings, llm, tools, "local", memory=memory)
+        self.conversation.notify = self.emit
+        self._yes_ignored = False      # hands-free: a risky "yes" with no wake word is ignored once
         self.state = "idle"
         self.listening = False
         self.ptt = False
@@ -141,12 +144,38 @@ class Engine:
         self._oneshot_task: asyncio.Task | None = None
         self._oneshot_owns_mic = False  # the hotkey opened the mic just for one request
         self._tasks: set[asyncio.Task] = set()
+        self.on_io_mode: Callable[[str], None] | None = None   # set by the server: load voice-only models on switch
+
+    # ---------------- chat / voice mode ----------------
+    def voice_on(self) -> bool:
+        """Voice mode: talk and hear replies. Chat mode: typed in, text out; mic and speaker stay closed."""
+        return self.settings.get("io_mode") != "chat"
+
+    def _make_speaker(self):
+        if self.voice_on():
+            return self.speaker_factory(self.tts.sample_rate, self.settings.get("output_device"))
+        return NullSpeaker(self.tts.sample_rate)
+
+    def sync_io_mode(self) -> None:
+        """Make the speaker and mic match the io_mode setting (after the dashboard, spidey or a command changed it)."""
+        want_voice = self.voice_on()
+        if self.speaker is None or want_voice == (not isinstance(self.speaker, NullSpeaker)):
+            return
+        self.speaker.stop()                     # not interrupt(): a reply in progress carries on, as text or voice
+        if not want_voice:
+            self.stop_listening()
+        self.speaker.close()
+        self.speaker = self._make_speaker()
+        mode = "voice" if want_voice else "chat"
+        self.emit({"type": "io_mode", "mode": mode})
+        if self.on_io_mode:
+            self.on_io_mode(mode)
 
     # ---------------- lifecycle ----------------
     async def start(self) -> None:
         self.loop = asyncio.get_running_loop()
         self._frames = asyncio.Queue(maxsize=400)
-        self.speaker = self.speaker_factory(self.tts.sample_rate, self.settings.get("output_device"))
+        self.speaker = self._make_speaker()
         self._spawn(self._frame_loop())
 
     async def shutdown(self) -> None:
@@ -198,14 +227,19 @@ class Engine:
 
     def status(self) -> dict:
         return {"state": self.state, "listening": self.listening, "ptt": self.ptt,
-                "mode": self.settings.get("mode"), "activation": self.settings.get("activation"),
+                "io_mode": "voice" if self.voice_on() else "chat", "mode": self.settings.get("mode"), "activation": self.settings.get("activation"),
                 "mic_level": round(self.mic.level, 4) if self.mic else 0.0,
-                "conversation_id": self.conversation.id, "latency": self.latency_summary()}
+                "looking": getattr(self.tools, "looking_now", lambda: None)(),
+                "conversation_id": self.conversation.id, "latency": self.latency_summary(),
+                "killed": bool(getattr(getattr(self.tools, "gate", None), "killed", None) and self.tools.gate.killed.is_set())}
 
     # ---------------- mic control ----------------
     def start_listening(self) -> None:
         self._oneshot_owns_mic = False  # an explicit "start listening" keeps the mic on
         if self.listening:
+            return
+        if not self.voice_on():
+            self.emit({"type": "error", "message": "Chat mode is on, so the mic stays off. Switch to voice mode to talk."})
             return
         self.vad.reset()
         self.mic = self.mic_factory(self._on_frame, self.settings.get("input_device"),
@@ -229,6 +263,9 @@ class Engine:
     def listen_once(self) -> None:
         """Global hotkey: stop talking, beep, and catch the next sentence (ends by itself when you stop speaking)."""
         self.interrupt()
+        if not self.voice_on():
+            self.emit({"type": "open_chat"})   # chat mode: the floating bot opens its typing bar instead
+            return
         self._take_floor()
         if not self.listening:
             self.start_listening()
@@ -502,7 +539,8 @@ class Engine:
             wake = self.settings.get("wake_word").lower()
             # While a video/music site JARVIS opened may be playing, the speakers talk too: always require the wake word.
             media_playing = await asyncio.to_thread(self._media_playing)
-            in_followup = time.monotonic() < self._followup_until and not media_playing
+            typing = getattr(self.conversation, "typing", None) is not None   # typing mode: keep taking dictation
+            in_followup = (time.monotonic() < self._followup_until or typing) and not media_playing
             found, text_wo = find_wake_word(text, wake)
             if self._wake_active():
                 # The audio model decides, not the transcript: "Travis"/"Jervis" no longer count. Backup: the exact
@@ -540,6 +578,16 @@ class Engine:
             return
         text = (self._prefix + " " + text).strip()
         self._prefix = ""
+        pending = self.conversation.pending
+        if require_wake and self.settings.get("activation") == "wake_word" and not found and pending and pending.risk == "high" and STRICT_YES.match(text):
+            # hands-free: a spoken "yes" to a send/buy/press without the wake word could be a TV. Ignore it once.
+            if not self._yes_ignored:
+                self._yes_ignored = True
+                self._voice_log("IGNORED once (risky yes without wake word)")
+                self.emit({"type": "ignored", "text": text, "reason": "say “Jarvis, yes” to confirm"})
+                self._set_state("idle")
+                return
+        self._yes_ignored = False
         if looks_incomplete(text) and require_wake:
             # Sounds unfinished ("so I was thinking and…"): give them a moment before answering.
             self._prefix, self._prefix_t = text, time.monotonic()
@@ -559,9 +607,11 @@ class Engine:
         self._start_turn(text, time.perf_counter(), 0.0)
 
     def _start_turn(self, text: str, t_end: float, stt_s: float) -> None:
+        ABORT.clear()                  # a new turn starts clean (the gate's latch stays until "resume")
         if self._turn and not self._turn.done():
             self._turn.cancel()
         self.emit({"type": "transcript", "role": "user", "text": text})
+        self.conversation.spoken_input = stt_s > 0     # typed text is taken word for word ("type …" keeps its full stop)
         self._turn = self._spawn(self._run_turn(text, t_end, stt_s))
 
     async def _run_turn(self, text: str, t_end: float, stt_s: float) -> None:
@@ -572,6 +622,13 @@ class Engine:
         tts_total = 0.0
         try:
             async for sentence in self.conversation.reply(text):
+                self.sync_io_mode()                    # "switch to chat mode" takes effect from this sentence on
+                if not self.voice_on():                # chat mode: text only, nothing synthesized
+                    if first_audio is None:
+                        first_audio = time.perf_counter() - t_end
+                    self._spoken.append(sentence)
+                    self.emit({"type": "transcript", "role": "assistant", "text": sentence})
+                    continue
                 t = time.perf_counter()
                 clip = await asyncio.to_thread(self.tts.synthesize, sentence)
                 tts_total += time.perf_counter() - t
@@ -607,6 +664,8 @@ class Engine:
 
     async def _speak_fixed(self, text: str) -> None:
         self.emit({"type": "transcript", "role": "assistant", "text": text})
+        if not self.voice_on():
+            return
         clip = await asyncio.to_thread(self.tts.synthesize, text)
         self._set_state("speaking")
         self.speaker.play(clip)
@@ -624,7 +683,8 @@ class Engine:
         if self._turn and not self._turn.done():
             self._turn.cancel()
         if was_talking:
-            started = self.speaker.clips_started - self._clip_base if self.speaker else 0
+            started = (self.speaker.clips_started - self._clip_base if self.speaker else 0) if self.voice_on() \
+                else len(self._spoken)              # chat mode: every line shown was read
             heard = self._spoken[:max(0, started)]
             hist = self.conversation.history
             if hist and hist[-1]["role"] == "assistant":  # nothing generated yet → leave the earlier reply alone
@@ -632,7 +692,25 @@ class Engine:
             self._followup_until = time.monotonic() + self.settings.get("followup_s")
             self.emit({"type": "interrupted"})
 
+    def kill(self) -> None:
+        """The kill switch: every click and key stops now, and stays stopped until the person says "resume".
+        The gate's latch is set first (from whichever thread this is), then everything in flight is cut off."""
+        gate = getattr(self.tools, "gate", None)
+        if gate:
+            gate.kill()
+        self.interrupt()
+        self.conversation.pending = None
+        edge = getattr(self.tools, "edge", None)
+        if edge is not None:
+            try:
+                edge.auto_scroll(False)
+                edge.banner(None)
+            except Exception:
+                pass
+        self.emit({"type": "kill"})
+
     def emergency_stop(self) -> None:
+        self.kill()
         self.interrupt()
         self.stop_listening()
         self._set_state("idle")
@@ -643,6 +721,7 @@ class Engine:
         if self.memory:
             self.memory.drop_recent()  # a new conversation starts a fresh thread; the facts about you stay
         self.conversation = Conversation(self.settings, self.llm, self.tools, "local", memory=self.memory)
+        self.conversation.notify = self.emit
         self.emit({"type": "conversation", "id": self.conversation.id})
 
     def latency_summary(self) -> dict:

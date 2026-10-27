@@ -12,6 +12,7 @@ __pycache__/
 *.pyc
 .pytest_cache/
 *.log
+data/actions.log*
 *.pem
 *.key
 *.pfx

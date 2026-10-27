@@ -16,6 +16,7 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 PATTERNS = {
     "Groq API key": r"gsk_[A-Za-z0-9]{20,}",
+    "Tavily API key": r"\btvly-(?:dev-|prod-)?[A-Za-z0-9]{20,}",
     "OpenAI-style key": r"\bsk-(?:proj-|ant-)?[A-Za-z0-9_-]{24,}",
     "GitHub token": r"\bgh[pousr]_[A-Za-z0-9]{30,}",
     "AWS access key": r"\bAKIA[0-9A-Z]{16}\b",
@@ -24,7 +25,7 @@ PATTERNS = {
     "secret assignment": r"(?i)\b(?:api[_-]?key|secret|token|password)\s*[=:]\s*['\"][A-Za-z0-9_\-]{24,}['\"]",
 }
 FORBIDDEN_PATHS = re.compile(r"(?:^|/)(?:data/|\.env(?:$|\.(?!example$))|memory\.json$|edge-agent/|edge-profile/|"
-                             r"conversations/|reminders[^/]*\.json$)", re.I)
+                             r"conversations/|actions\.log[^/]*$|reminders[^/]*\.json$)", re.I)
 ALLOW_IN_FILE = {"scripts/git_secret_scan.py"}            # this file describes the patterns
 
 

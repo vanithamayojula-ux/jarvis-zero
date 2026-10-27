@@ -18,7 +18,9 @@ from urllib.parse import quote, urlparse
 
 from websockets.sync.client import connect
 
+from .gate import ABORT, Action, Gate, text_class
 from .safety import sensitive_field
+from .untrusted import clean_label as _plain      # tab titles and page text are data: plain, short, no control characters
 
 BLOCKED_PAGE = """<!doctype html><meta name=viewport content="width=device-width"><title>Blocked by JARVIS</title>
 <body style="font:16px system-ui;background:#111;color:#eee;display:grid;place-items:center;height:90vh;margin:0">
@@ -56,6 +58,25 @@ JS_FIND_INPUT = r"""
   for (const s of sels) {
     const e = [...document.querySelectorAll(s)].find(vis);
     if (e) { e.scrollIntoView({block: 'center'}); e.focus(); if (e.click) e.click(); return prep(e); }
+  }
+  return null;
+})()
+"""
+
+# "type X in the search bar": the page's search box even when another box has the focus
+JS_FIND_SEARCH = r"""
+(() => {
+  const vis = e => { const r = e.getBoundingClientRect(); return r.width > 4 && r.height > 4 && getComputedStyle(e).visibility !== 'hidden'; };
+  const sels = ['input[name="search_query"]', 'input[type="search"]', 'textarea[name="q"]', 'input[name="q"]',
+                'input[role="searchbox"]', '[role="searchbox"]', 'input[role="combobox"]', '[role="combobox"] input',
+                'input[aria-label*="search" i]', 'input[placeholder*="search" i]', 'input[name*="search" i]'];
+  for (const s of sels) {
+    const e = [...document.querySelectorAll(s)].find(vis);
+    if (!e) continue;
+    e.scrollIntoView({block: 'center'}); e.focus(); if (e.click) e.click();
+    if (e.select) e.select();
+    return {how: 'field', kind: e.type || 'search', name: e.name || e.id || '', auto: e.getAttribute('autocomplete') || '',
+            label: (e.getAttribute('aria-label') || e.placeholder || '').slice(0, 80)};
   }
   return null;
 })()
@@ -170,12 +191,78 @@ JS_MEDIA = r"""
 """
 
 JS_READ = r"""
-(() => {
+((offset) => {
   const main = document.querySelector('main, article, #content, [role="main"]') || document.body;
   const text = (main.innerText || '').replace(/\n{3,}/g, '\n\n').trim();
-  return {title: document.title, url: location.href, text: text.slice(0, 6000)};
-})()
+  return {title: document.title, url: location.href, text: text.slice(offset, offset + 6000), total: text.length, offset: offset};
+})
 """
+
+# Find text on the page. Walks the page's own text nodes only: never what is typed into a box (input values, textareas,
+# editable areas, password fields are skipped), never scripts, styles or anything hidden. At most 5000 nodes and 150 ms.
+# The word arrives through json.dumps, so quotes, backticks and "</script>" are just characters. Matches are shown with the
+# browser's own highlight (or an outline JARVIS adds and removes itself), then cleared after 20 seconds.
+JS_FIND = r"""
+((term, n) => {
+  const t0 = performance.now(), want = String(term).toLowerCase().slice(0, 80);
+  if (!want) return {count: 0, index: 0, snippet: ''};
+  const skip = 'script,style,noscript,template,textarea,input,select,option,[contenteditable],[hidden],[aria-hidden="true"]';
+  const walker = document.createTreeWalker(document.body || document.documentElement, NodeFilter.SHOW_TEXT);
+  const found = [];
+  let nodes = 0, node;
+  while ((node = walker.nextNode())) {
+    if (++nodes > 5000 || performance.now() - t0 > 150 || found.length >= 500) break;
+    const el = node.parentElement;
+    if (!el || el.closest(skip)) continue;
+    const text = node.nodeValue || '';
+    const low = text.toLowerCase();
+    let at = low.indexOf(want);
+    if (at < 0) continue;
+    const r = el.getBoundingClientRect(), s = getComputedStyle(el);
+    if ((r.width < 1 && r.height < 1) || s.visibility === 'hidden' || s.display === 'none') continue;
+    while (at >= 0 && found.length < 500) { found.push([node, at]); at = low.indexOf(want, at + want.length); }
+  }
+  const count = found.length;
+  if (!count) return {count: 0, index: 0, snippet: ''};
+  const index = ((n % count) + count) % count;
+  const range = (m) => { const r = document.createRange(); r.setStart(m[0], m[1]); r.setEnd(m[0], m[1] + want.length); return r; };
+  const [cn, at] = found[index];
+  const el = cn.parentElement;
+  el.scrollIntoView({block: 'center', inline: 'nearest'});
+  try {
+    if (window.__jarvisFindTimer) { clearTimeout(window.__jarvisFindTimer); window.__jarvisFindClear && window.__jarvisFindClear(); }
+    if (window.CSS && CSS.highlights && window.Highlight) {
+      let st = document.getElementById('__jarvis_find_style');
+      if (!st) { st = document.createElement('style'); st.id = '__jarvis_find_style';
+        st.textContent = '::highlight(jarvis-find){background:#ffe14d;color:#000}::highlight(jarvis-find-now){background:#ff9f1a;color:#000}';
+        document.head.appendChild(st); }
+      CSS.highlights.set('jarvis-find', new Highlight(...found.map(range)));
+      CSS.highlights.set('jarvis-find-now', new Highlight(range(found[index])));
+      window.__jarvisFindClear = () => { CSS.highlights.delete('jarvis-find'); CSS.highlights.delete('jarvis-find-now');
+        const s = document.getElementById('__jarvis_find_style'); if (s) s.remove(); };
+    } else {
+      const old = el.style.outline;
+      el.style.outline = '3px solid #ff2e42';
+      window.__jarvisFindClear = () => { el.style.outline = old; };
+    }
+    window.__jarvisFindTimer = setTimeout(() => { window.__jarvisFindClear(); window.__jarvisFindTimer = null; }, 20000);
+  } catch (e) {}
+  const text = cn.nodeValue || '';
+  const from = Math.max(0, at - 30);
+  return {count, index, snippet: text.slice(from, at + want.length + 40).replace(/\s+/g, ' ').trim()};
+})
+"""
+
+JS_ACTIVE_FIELD = r"""
+(() => { const a = document.activeElement;
+  if (!a || a === document.body) return null;
+  return {tag: a.tagName.toLowerCase(), type: (a.type || '').toLowerCase(), name: a.name || a.id || '',
+          auto: a.getAttribute('autocomplete') || '',
+          label: ((a.labels && a.labels[0] && a.labels[0].innerText) || a.getAttribute('aria-label') || a.placeholder || '').slice(0, 80)}; })()
+"""
+
+# document.visibilityState / hasFocus: which tab is the one in front, asked of each tab (once a second at most)
+JS_IN_FRONT = "(document.visibilityState === 'visible' && document.hasFocus())"
 
 # Everything you could act on, numbered (data-jarvis-id), with the label a person would read: form fields first,
 # then buttons, then links. Password values are never read back, only whether one is filled.
@@ -210,6 +297,7 @@ JS_SNAPSHOT = r"""
         if (type === 'checkbox' || type === 'radio') it.checked = e.checked;
         else it.value = type === 'password' ? (e.value ? '(filled)' : '') : clean(e.value);
       }
+      if (e.form && e.form.querySelector('input[type=password]')) it.pwform = true;   // part of a sign-in / sign-up form
       if (e.getAttribute('autocomplete')) it.auto = e.getAttribute('autocomplete');
       if (e.name) it.name = e.name;
       if (e.required || e.getAttribute('aria-required') === 'true') it.required = true;
@@ -324,8 +412,12 @@ class BrowserError(RuntimeError):
 
 
 class EdgeController:
-    def __init__(self, profile_dir: Path, port: int = 0, edge_path: str | None = None, guard=None):
+    FEATURES_OFF = "msEdgeSidebarV2,msImplicitSignin"     # Edge keeps only the last --disable-features, so one list
+
+    def __init__(self, profile_dir: Path, port: int = 0, edge_path: str | None = None, guard=None,
+                 gate: Gate | None = None):
         self.guard = guard                 # SiteGuard: bad sites are refused before they load (None = no checks)
+        self.gate = gate or Gate.permissive()   # every click / key / typed character passes it (the server passes its own)
         self.blocked: list[tuple[float, str, str]] = []   # (when, url, reason) of what the guard stopped
         self._watching = False
         self.profile_dir = Path(profile_dir)
@@ -438,10 +530,10 @@ class EdgeController:
         subprocess.Popen([self.edge_path, f"--remote-debugging-port={self.fixed_port}", "--remote-debugging-address=127.0.0.1",
                           f"--user-data-dir={self.profile_dir}", "--no-first-run", "--no-default-browser-check",
                           "--disable-sync",  # keep this profile separate: don't pull in your Microsoft account data
-                          "--disable-features=msEdgeSidebarV2,msImplicitSignin", "--start-maximized",
+                          f"--disable-features={self.FEATURES_OFF}",
                           # keep working when the window is behind others (auto-scroll, waiting pages, timers)
                           "--disable-background-timer-throttling", "--disable-renderer-backgrounding",
-                          "--disable-backgrounding-occluded-windows", "about:blank"],
+                          "--disable-backgrounding-occluded-windows", *self._window_args()],
                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
         for _ in range(60):
             time.sleep(0.25)
@@ -452,6 +544,10 @@ class EdgeController:
                 self._start_watchdog()
                 return
         raise BrowserError("Edge didn't start.")
+
+    def _window_args(self) -> list[str]:
+        """How the first window opens (the mini TV opens a small app window instead)."""
+        return ["--start-maximized", "about:blank"]
 
     # ---------- the site guard ----------
     def check_url(self, url: str) -> None:
@@ -520,8 +616,177 @@ class EdgeController:
         if not pages:
             return self._http("/json/new?about:blank", method="PUT")
         real = [p for p in pages if p.get("url", "").startswith("http")]
+        front = self._tab_in_front(pages)     # the tab you can actually see beats "the one JARVIS opened last"
         mine = next((p for p in real if p.get("id") == getattr(self, "_last_opened", None)), None)
-        return mine or (real[0] if real else pages[0])
+        return front or mine or (real[0] if real else pages[0])
+
+    def _tab_in_front(self, pages: list[dict]) -> dict | None:
+        """The tab that is visible and has the focus, found by asking up to the first six tabs once (cached for a second).
+        With a single tab there is nothing to ask. None when no tab claims the focus (another app is in front)."""
+        if len(pages) < 2:
+            return None
+        now = time.monotonic()
+        cached = getattr(self, "_front_cache", None)
+        if cached and now - cached[0] < 1.0:
+            return next((p for p in pages if p.get("id") == cached[1]), None)
+        found = None
+        for page in pages[:6]:
+            if not page.get("url", "").startswith(("http", "file:", "data:")):
+                continue
+            try:
+                if self._eval(page, JS_IN_FRONT):
+                    found = page
+                    break
+            except Exception:
+                continue
+        self._front_cache = (now, found.get("id") if found else None)
+        return found
+
+    # ---------- tabs (titles and addresses are DATA: spoken only, control characters stripped, never routed) ----------
+    def tabs(self) -> list[dict]:
+        """Real pages in a steady order: the order JARVIS first saw them, which is the order they were opened in."""
+        pages = self.pages()
+        seq = self.__dict__.setdefault("_tab_seq", {})
+        for p in reversed(pages):                 # the list is most recent first, so this is oldest first
+            if p.get("id") not in seq:
+                seq[p.get("id")] = self._tab_n = getattr(self, "_tab_n", -1) + 1
+        for gone in [i for i in seq if i not in {p.get("id") for p in pages}]:
+            del seq[gone]
+        return sorted(pages, key=lambda p: seq[p.get("id")])
+
+    def tab_list(self) -> list[dict]:
+        """At most 15 tabs: {n, title (60 characters), host, active}."""
+        self.ensure_running()
+        pages = self.tabs()
+        try:
+            active = self.active_page().get("id")
+        except Exception:
+            active = None
+        return [{"n": i, "title": _plain(p.get("title") or "", 60) or "(no title)",
+                 "host": _plain(urlparse(p.get("url", "")).hostname or "", 60), "active": p.get("id") == active}
+                for i, p in enumerate(pages[:15], 1)]
+
+    def _resolve_tab(self, which) -> tuple[dict, list[dict]]:
+        """A number (1-based), 'last', 'next', 'previous', or words from a title/host → (that page, all pages)."""
+        pages = self.tabs()
+        if not pages:
+            raise BrowserError("I don't have any tabs open.")
+        if isinstance(which, int) or (isinstance(which, str) and which.strip().lstrip("-").isdigit()):
+            n = int(which)
+            if not 1 <= n <= len(pages):
+                raise BrowserError(f"I only have {len(pages)} tab{'s' if len(pages) != 1 else ''} open.")
+            return pages[n - 1], pages
+        word = str(which or "").strip().lower()
+        if word in ("last", "final"):
+            return pages[-1], pages
+        if word in ("next", "previous", "prev"):
+            cur = next((i for i, p in enumerate(pages) if p.get("id") == self.active_page().get("id")), 0)
+            return pages[(cur + (1 if word == "next" else -1)) % len(pages)], pages
+        if not word:
+            raise BrowserError("Which tab? Say its number or a word from its title.")
+        hits = [p for p in pages if word in (p.get("title") or "").lower() or word in (urlparse(p.get("url", "")).hostname or "")]
+        if len(hits) == 1:
+            return hits[0], pages
+        if not hits:
+            raise BrowserError(f"I can't find a tab about {_plain(word, 30)}.")
+        raise BrowserError(f"{len(hits)} tabs match {_plain(word, 30)}. Say the number instead: " + "; ".join(
+            f"{pages.index(p) + 1}, {_plain(p.get('title') or p.get('url', ''), 30)}" for p in hits[:4]) + ".")
+
+    def switch_tab(self, which) -> str:
+        """Bring a tab to the front. Returns its title (data: the caller only speaks it)."""
+        self.ensure_running()
+        page, _ = self._resolve_tab(which)
+        self._authorize("browser_tab", "switch")
+        self._http(f"/json/activate/{page['id']}")
+        self._last_opened = page["id"]
+        self._front_cache = None
+        return _plain(page.get("title") or page.get("url", ""), 60)
+
+    def close_tab(self, which) -> str:
+        """Close one tab. The last tab is never closed (an empty browser has nothing for me to work in)."""
+        self.ensure_running()
+        page, pages = self._resolve_tab(which)
+        if len(pages) <= 1:
+            raise BrowserError("That's my only tab, so I'll leave it open.")
+        self._authorize("browser_tab", "close")
+        self._http(f"/json/close/{page['id']}")
+        self._front_cache = None
+        return _plain(page.get("title") or page.get("url", ""), 60)
+
+    def close_others(self) -> int:
+        """Close every tab except the one in front. Returns how many were closed (the caller asked first)."""
+        self.ensure_running()
+        pages = self.tabs()
+        if len(pages) <= 1:
+            return 0
+        keep = self.active_page().get("id")
+        if not any(p.get("id") == keep for p in pages):
+            keep = pages[0].get("id")
+        self._authorize("browser_tab", "close others")
+        closed = 0
+        for p in pages:
+            if p.get("id") != keep:
+                self._http(f"/json/close/{p['id']}")
+                closed += 1
+        self._last_opened = keep
+        self._front_cache = None
+        return closed
+
+    # ---------- find on the page ----------
+    def find(self, term: str, n: int = 0) -> dict:
+        """Count and show matches of a word on the current page: {count, index, snippet}. n picks which match to show
+        (wraps around). Page text only: never what is typed into a box. The page must pass the same read check as a window."""
+        term = str(term or "").strip()[:80]
+        if not term:
+            raise BrowserError("What should I look for?")
+        page = self.active_page()
+        why = self.gate.read_allowed(None, {"proc": "msedge.exe", "title": page.get("title") or page.get("url") or "",
+                                            "address": page.get("url", ""), "own": False, "excluded": False})
+        if why:
+            raise BrowserError(why)
+        self._authorize("browser_find", "", term)            # the kill switch counts; only the length is logged
+        res = self._eval(page, f"{JS_FIND}({json.dumps(term)}, {int(n)})") or {}
+        return {"count": int(res.get("count") or 0), "index": int(res.get("index") or 0),
+                "snippet": _plain(res.get("snippet") or "", 80)}
+
+    def page_info(self) -> dict:
+        """Title and address of the current tab, for 'what's the page title / address'."""
+        p = self.active_page()
+        u = urlparse(p.get("url", ""))
+        where = f"{u.hostname or ''}{u.path if len(u.path) > 1 else ''}"[:100]      # no query string: it can carry tokens
+        return {"title": _plain(p.get("title") or "", 100), "address": _plain(where or p.get("url", "")[:60], 100)}
+
+    # ---------- keyboard shortcuts (through the gate; many browser keys don't work from outside, and we say so) ----------
+    _NAV_COMBOS = {"alt+left": "back", "alt+right": "forward", "f5": "reload", "ctrl+t": "new tab", "ctrl+w": "close"}
+    _EDIT_COMBOS = {"ctrl+a": "selectAll", "ctrl+c": "copy", "ctrl+x": "cut", "ctrl+v": "paste", "ctrl+z": "undo",
+                    "ctrl+y": "redo"}
+
+    def press_combo(self, combo: str) -> str:
+        """A shortcut from the allowed list, done in the way that works for a page controlled from outside. Raises a spoken
+        BrowserError for the ones that can't be done here (the person is told, nothing is pretended)."""
+        norm = combo.lower().strip()
+        if norm in self._NAV_COMBOS:
+            self._authorize("browser_key", key=norm)
+            self.navigate(self._NAV_COMBOS[norm])
+            return norm
+        if norm == "ctrl+tab":
+            self.switch_tab("next")
+            return norm
+        if norm in self._EDIT_COMBOS:
+            page = self.active_page()
+            field = self._eval(page, JS_ACTIVE_FIELD) or {}
+            if norm == "ctrl+v" and sensitive_field(field.get("label", ""), field.get("type", ""), field.get("auto", ""),
+                                                    field.get("name", "")):
+                raise BrowserError("That's a password, PIN, OTP, card or ID-number box. I never paste into those.")
+            self._authorize("browser_key", key=norm)
+            vk = ord(norm[-1].upper())
+            base = {"key": norm[-1], "code": f"Key{norm[-1].upper()}", "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk,
+                    "modifiers": 2, "commands": [self._EDIT_COMBOS[norm]]}
+            self._cdp(page, [("Input.dispatchKeyEvent", {**base, "type": "rawKeyDown"}),
+                             ("Input.dispatchKeyEvent", {**{k: v for k, v in base.items() if k != "commands"}, "type": "keyUp"})])
+            return norm
+        raise BrowserError("I can't press that one inside my Edge window from the outside. I can do back, forward, refresh, "
+                           "new tab, close tab, and copy, paste, cut, undo, redo or select all.")
 
     # ---------- CDP ----------
     def _cdp(self, page: dict, calls: list[tuple[str, dict]], timeout: float = 8.0) -> list[dict]:
@@ -546,6 +811,16 @@ class EdgeController:
         if res.get("exceptionDetails"):
             raise BrowserError("page script failed")
         return res.get("result", {}).get("value")
+
+    def _authorize(self, kind: str, label: str = "", text: str = "", key: str = "") -> None:
+        """The gate's yes/no for anything that sends a click or key into the page. 'Ask the person first' for page
+        buttons is the caller's job (it asked before getting here); the gate's kill switch, breaker and secret-box
+        rules apply here no matter who calls."""
+        if ABORT.is_set():
+            raise BrowserError("Stopped.")
+        d = self.gate.authorize(Action(kind, None, "msedge.exe", "", label, len(text), key, "user", "", text_class(text)))
+        if d.verdict == "deny":
+            raise BrowserError(d.say)
 
     def _focus_window(self, page: dict) -> None:
         try:
@@ -572,15 +847,16 @@ class EdgeController:
         p = self.active_page()
         return {"title": p.get("title", ""), "url": p.get("url", ""), "host": urlparse(p.get("url", "")).hostname or ""}
 
-    def type_text(self, text: str) -> dict:
+    def type_text(self, text: str, search: bool = False) -> dict:
         page = self.active_page()
         self._focus_window(page)
-        where = self._eval(page, JS_FIND_INPUT)
+        where = (self._eval(page, JS_FIND_SEARCH) if search else None) or self._eval(page, JS_FIND_INPUT)
         if not where:
             raise BrowserError("I can't find a text box on this page.")
         if sensitive_field(where.get("label", ""), where.get("kind", ""), where.get("auto", ""), where.get("name", "")):
             raise BrowserError("That's a password, PIN, OTP, card or ID-number box. I never type into those, "
                                "so please type it yourself.")
+        self._authorize("browser_fill", where.get("label", ""), text)
         self._fx(page, "field")
         self._cdp(page, [("Input.insertText", {"text": text})])
         is_search = bool(self._eval(page, JS_IS_SEARCH_FIELD))
@@ -595,8 +871,9 @@ class EdgeController:
             k, code, vk = key, f"Key{key.upper()}", ord(key.upper())
         else:
             raise BrowserError(f"Unknown key {key}.")
+        self._authorize("browser_key", key=name)
         mods = 8 if shift else 0
-        base = {"key": k, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk, "modifiers": mods}
+        base ={"key": k, "code": code, "windowsVirtualKeyCode": vk, "nativeVirtualKeyCode": vk, "modifiers": mods}
         down = {**base, "type": "keyDown"}
         if name == "enter":
             down["text"] = "\r"
@@ -617,6 +894,7 @@ class EdgeController:
         time.sleep(0.15)  # let scrollIntoView settle
         hit = self._eval(page, f"{JS_FIND_CLICK}({json.dumps(target)}, {int(nth)})") or hit
         x, y = hit["x"], hit["y"]
+        self._authorize("browser_click", hit.get("text") or target)
         self._fx(page, "click", 0, x, y)
         ev = {"x": x, "y": y, "button": "left", "clickCount": 1}
         self._cdp(page, [("Input.dispatchMouseEvent", {**ev, "type": "mouseMoved"}),
@@ -660,21 +938,22 @@ class EdgeController:
         now = time.monotonic()
         if now - getattr(self, "_playing_at", 0) < 2:
             return self._playing
-        playing = False
+        playing, title = False, ""
         try:
             if self.running():
                 js = "[...document.querySelectorAll('video,audio')].some(v => !v.paused && !v.muted && v.volume > 0 && v.currentTime > 0)"
                 for page in self.pages()[:6]:
                     if page.get("url", "").startswith("http") and self._eval(page, js):
-                        playing = True
+                        playing, title = True, page.get("title", "")
                         break
         except Exception:
             playing = False
-        self._playing, self._playing_at = playing, now
+        self._playing, self._playing_at, self.playing_title = playing, now, title
         return playing
 
-    def read(self) -> dict:
-        return self._eval(self.active_page(), JS_READ) or {}
+    def read(self, offset: int = 0) -> dict:
+        """Title, address and up to 6000 characters of the page's text from `offset` on ('total' = how long it is)."""
+        return self._eval(self.active_page(), f"{JS_READ}({max(0, int(offset))})") or {}
 
     # ---------- Puppeteer-style: see the page as numbered elements, act on them ----------
     def snapshot(self) -> dict:
@@ -683,9 +962,11 @@ class EdgeController:
     def act(self, el_id: int, action: str, value=None) -> dict:
         """fill (types like a person: focus, replace, insert), select (dropdown option), check (tick/untick),
         click (real mouse event at the element)."""
+        if ABORT.is_set():
+            raise BrowserError("Stopped.")
         page = self.active_page()
         self._focus_window(page)
-        js = lambda a, v: self._eval(page, f"{JS_ACT}({int(el_id)}, {json.dumps(a)}, {json.dumps(v)})") or {}  # noqa: E731
+        js = lambda a, v:self._eval(page, f"{JS_ACT}({int(el_id)}, {json.dumps(a)}, {json.dumps(v)})") or {}  # noqa: E731
         if action == "fill":
             hit = js("focus", None)
             if not hit.get("ok"):
@@ -695,6 +976,7 @@ class EdgeController:
                 self._fx(page, "field", el_id)
                 return {**hit, "ok": False, "sensitive": True,
                         "why": "it's a password, PIN, OTP, card or ID-number box, which I never type into. Please type that yourself"}
+            self._authorize("browser_fill", hit.get("label", ""), str(value))
             self._fx(page, "field", el_id)
             if hit.get("type") in ("time", "date", "datetime-local", "month", "week", "color", "range"):
                 js("setvalue", str(value))
@@ -705,12 +987,14 @@ class EdgeController:
                 return {**hit, "ok": False, "why": "the value didn't stick"}
             return {**hit, "ok": True}
         if action in ("select", "check"):
+            self._authorize("browser_click", f"{action} {el_id}")
             return js(action, value)
         hit = js("click", None)
         if not hit.get("ok") or "x" not in hit:
             return hit
         time.sleep(0.12)                              # let scrollIntoView settle
         hit = js("click", None) or hit
+        self._authorize("browser_click", hit.get("label", "") or f"element {el_id}")
         self._fx(page, "click", el_id, hit["x"], hit["y"])
         ev = {"x": hit["x"], "y": hit["y"], "button": "left", "clickCount": 1}
         self._cdp(page, [("Input.dispatchMouseEvent", {**ev, "type": "mouseMoved"}),

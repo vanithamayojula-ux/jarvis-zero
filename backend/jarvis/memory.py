@@ -105,7 +105,7 @@ class Memory:
     # ---- the thread you were on ----
     def save_recent(self, history: list[dict]) -> None:
         msgs = [{"role": m["role"], "content": str(m.get("content", ""))[:600]} for m in history
-                if m.get("role") in ("user", "assistant") and m.get("content")]
+                if m.get("role") in ("user", "assistant") and m.get("content") and not m.get("screen")]
         with self._lock:
             self.data["recent"], self.data["recent_at"] = msgs[-self.RECENT:], time.time()
             self._save()

@@ -125,3 +125,49 @@ def test_not_sure_offer_then_yes_really_searches(settings, tmp_path):
     assert "not sure" in say(conv, "who is hanumankind?")
     assert "Searching" in say(conv, "yes")
     assert edge.log[-1] == ("open", "https://www.google.com/search?q=who+is+hanumankind")
+
+
+# 25 Oct: typed chats sometimes took 15-20 s. A kept-alive connection Groq had closed raised RemoteProtocolError,
+# the cloud was switched off for 30 s, and the local model had to load. Now one retry on a fresh connection.
+def test_dropped_connection_is_retried_not_sent_to_local():
+    calls = []
+
+    def groq(req):
+        calls.append(1)
+        if len(calls) == 1:
+            raise httpx.RemoteProtocolError("Server disconnected without sending a response.")
+        return httpx.Response(200, content=sse({"content": "Hey!"}))
+    llm = make_llm(groq)
+    assert "".join(c.text for c in collect(llm)) == "Hey!" and llm.last_source == "cloud"
+    assert len(calls) == 2 and llm.status()["cloud_paused_for_s"] == 0
+
+
+def test_offline_pauses_the_cloud_only_briefly():
+    def groq(req):
+        raise httpx.ConnectError("no internet")
+    llm = make_llm(groq)
+    collect(llm)
+    assert 0 < llm.status()["cloud_paused_for_s"] <= 8
+
+
+def test_complete_and_background_helpers_retry_too():
+    calls = []
+
+    def groq(req):
+        calls.append(1)
+        if len(calls) % 2:
+            raise httpx.RemoteProtocolError("Server disconnected")
+        return httpx.Response(200, json={"choices": [{"message": {"content": "ok"}}]})
+    llm = make_llm(groq)
+    msgs = [{"role": "system", "content": "x"}, {"role": "user", "content": "y"}]
+    assert asyncio.run(llm.complete(msgs)) == "ok" and llm.last_source == "cloud"
+    assert asyncio.run(llm.cloud_only(msgs)) == "ok"
+    assert llm.status()["cloud_paused_for_s"] == 0
+
+
+def test_background_helper_failure_never_pauses_chat():
+    def groq(req):
+        raise httpx.ReadTimeout("slow")
+    llm = make_llm(groq)
+    assert asyncio.run(llm.cloud_only([{"role": "system", "content": "x"}, {"role": "user", "content": "y"}])) is None
+    assert llm.status()["cloud_paused_for_s"] == 0
