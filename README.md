@@ -181,3 +181,7 @@ The tests cover: G.711 μ-law/A-law against the reference implementation; resamp
 | Port 8600 in use | Something else is running there; close it, or change `PORT` in `backend/jarvis/server.py` and `vite.config.ts` |
 | Phone/softphone can't reach Spidey | Is the phone on the laptop's Mobile hotspot (not hostel Wi-Fi)? Is SIP *Enabled* in Calls? Did you run `scripts\setup-phone.ps1` once? Is the phone's network in *Allowed networks*? Is the dialled address shown in the card? Does *Recently ignored* list your phone's IP? If so, allow it |
 | Call connects but there's no audio | In Linphone set Media encryption = None and enable PCMU/PCMA; re-run `setup-phone.ps1` (RTP ports 40000–40101 must be allowed) |
+
+## License
+
+MIT. See [LICENSE](LICENSE).
